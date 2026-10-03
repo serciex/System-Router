@@ -1,0 +1,71 @@
+# System Router default configuration.
+# Paths are relative to the repository root unless absolute.
+# Override any value from the command line with --set key.sub=value.
+
+paths:
+  r2dreamer: "dreamer v3"          # NM512/r2dreamer submodule (world model)
+  system_one: "system one"         # sgoedecke/system-one submodule (reference for the System 1 method)
+  model: "models/Qwen3.5-9B"       # local repo or Hugging Face id, e.g. Qwen/Qwen3.5-4B
+  runs: "runs"                     # logs, checkpoints, step logs
+  label_cache: "runs/label_cache"  # labeler cache (one label per screen and subtask)
+
+llm:
+  dtype: bfloat16                  # bfloat16 | float16 | float32
+  quantization: none               # none | 4bit | 8bit (bitsandbytes)
+  device_map: auto
+  text_feature_layer: 24           # hidden layer read as the world model's text feature
+  s2_max_new_tokens: 768
+  s2_temperature: 0.0
+
+grid:
+  levels: [1, 3]                   # active levels (start with 1 and 3; add 2 later)
+  sizes: {1: 3, 2: 6, 3: 12}       # cells per side for each level
+  level1_span: 0.6                 # level-1 3x3 block covers this fraction of the view around the anchor
+
+features:
+  vision_grid: 12                  # VLM patch features are pooled to this many cells per side
+  cell_dim: 32                     # per-cell feature size after a fixed random projection
+  text_dim: 256                    # text feature size after a fixed random projection
+  seed: 0
+
+system1:
+  labels: auto                     # auto | index | letters (auto: index up to 10 options, letters above)
+  max_options: 100
+  escalate_below: 0.35             # hard rule: escalate to System 2 if confidence is below this
+
+goal:
+  stall_steps: 8                   # steps on one subtask before System 2 replans
+
+rewards:
+  seg: {beta: 1.0, c: 0.1, eps: 0.01}
+  dec: {a: 0.2, b: 1.0, p: 0.5, p_irr: 2.0, q: 0.5, kappa: 0.05}
+  expected_latency_ms: 1500        # per environment type; measure in stage 1 before trusting
+  log_weights: {seg: 0.5, dec: 0.5} # logging only, never used for gradients
+
+limits:                            # protected core, read-only to the LLM
+  allow_irreversible: false
+  allowed_verbs: [click, type, select, scroll_up, scroll_down, press, hold, none]
+
+env:
+  suite: miniwob
+  tasks: [click-test-2, click-button, click-link, focus-text, enter-text, login-user]
+  max_steps: 30
+  render: false
+  adapters: [dom]                  # per-episode choice from adapter_pool when adapter_pool is set
+  adapter_pool: []                 # e.g. [[dom], [a11y], [vision], ["degraded:dom"]]
+  heldout_adapters: []             # never sampled in training, used for evaluation
+  degraded: {drop: 0.2, jitter: 0.02, blank_label: 0.2}
+  vision_weights: "models/OmniParser"  # OmniParser weights (added later)
+
+labeler:
+  enabled: true                    # training only; stage 1 can run without it
+
+dreamer:                           # overrides applied to r2dreamer's hydra config
+  model: size12M
+  rep_loss: r2dreamer
+  device: "cuda:0"
+  batch_size: 16
+  batch_length: 32
+  steps: 200000
+  train_ratio: 64
+  imag_horizon: 15

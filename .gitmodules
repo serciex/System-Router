@@ -1,0 +1,6 @@
+[submodule "system one"]
+	path = system one
+	url = https://github.com/sgoedecke/system-one
+[submodule "dreamer v3"]
+	path = dreamer v3
+	url = https://github.com/NM512/r2dreamer

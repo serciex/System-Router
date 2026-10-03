@@ -1,0 +1,21 @@
+# Model weights and checkouts live outside version control
+models/
+
+# Runs, logs, checkpoints, label cache
+runs/
+logdir/
+*.pt
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Notebooks' checkpoints and local env files
+.ipynb_checkpoints/
+.env
+.DS_Store
