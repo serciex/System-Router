@@ -9,7 +9,8 @@ Supersedes [v1](Universal%20Brain,%20Interchangeable%20Bodies%20Technical%20Desi
 - The world model no longer drives decisions. It learns dynamics and decides **what to look at, how coarsely, and who acts**. All decisions stay with the LLM.
 - The world model sees through the **frozen VLM's own features** (vision patches and a text hidden state). The separate BERT encoder and Dreamer CNN are removed.
 - The body is a **target contract built once**, with one sub-contract per decision model (navigation and action). Environments are added with a thin adapter only.
-- Rewards are **two separate terms**, segmentation and decision, scored against a frozen, privileged labeler.
+- The world model is trained **supervised first**: episodes are collected once with both System 1 and System 2 answering every step, labeled in hindsight from the environment's verified success, and used offline to train two heads (which cells matter, will System 1 be wrong). **RL fine-tuning** with the two reward terms comes after, starting from that trained model.
+- Rewards are **two separate terms**, segmentation and decision, used in the later RL stage.
 - Scope is narrowed: **the LLM stays frozen, only the world model is trained**, across many adapters. LLM training comes later, to teach it to create adapters.
 - Training uses **sandboxed environments only** (MiniWoB++, WebArena, OSWorld VM), never the live web.
 
@@ -117,7 +118,12 @@ Navigation and action are separate decision models, each restricted to its own s
 
 ### Role
 
-The world model learns dynamics so its policy can train on imagined rollouts. It predicts how the view and the available targets change after actions, including how the frozen LLM will behave. Its policy makes three choices per step and nothing else: **route, level, cells**.
+The world model learns dynamics, predicting how the view and the available targets change after actions, including how the frozen LLM will behave. It makes three choices per step and nothing else: **route, level, cells**.
+
+It is trained in two phases:
+
+1. **Supervised, offline (this phase).** Two heads read the latent. The **cells head** predicts, per grid cell, whether an important target is there. The **escalation head** predicts whether System 1 will be wrong on this step. At run time, route is a threshold on the escalation head and cells are the highest-scoring cells above a threshold, within a budget. The thresholds and budget are tuned on held-out episodes.
+2. **RL fine-tuning, online (after the supervised heads work).** The policy trains on imagined rollouts with the two reward terms, starting from the supervised world model rather than from scratch.
 
 ### Inputs
 
@@ -195,7 +201,22 @@ goal → task list → current subtask → last outcome │ state + targets → 
 3. Check that Qwen3.5's hybrid attention (Gated DeltaNet recurrent state) works with `cache_prefix`, left padding, and cross-step caching.
 4. Match the chat template's thinking toggle to the flag System One passes.
 
-## Labeler
+## Collected data and hindsight labels
+
+The expensive LLM calls happen once. Episodes are collected with the stage-1 segmentation rule (every cell that holds a target, so every target is offered) and with **both System 1 and System 2 answering every step**. One of them is executed (System 2 by default, for the most successes). Each step stores the world model's inputs, the decision taken, every target's position, and both systems' answers.
+
+Labels come from the environment's verified success, not from an extra LLM judgment, so they cannot reward System 1 for agreeing with itself:
+
+| Label | Source |
+| --- | --- |
+| Important cells | In episodes the environment marked successful, the cells (at every active level) holding targets the agent actually reached or acted on |
+| System 1 wrong | System 1's answer differs from System 2's on the same step (or, optionally, is not on the successful path) |
+
+Unsuccessful episodes give no cell labels. Tasks no episode solved give no segmentation signal until System 2 solves them. Episodes collected with held-out adapters are kept for evaluation only.
+
+## Labeler (optional)
+
+Hindsight labels are the default. The LLM labeler remains available for scoring and for the RL stage, but its verdicts must first be checked against the environment's real success on a few hundred episodes, since it is the same model as System 1.
 
 The labeler is the frozen VLM with privileged access to the environment's source through the contract's `describe_source()` (DOM, accessibility tree, or code). It is used only during training. For each screen and subtask it produces:
 
@@ -205,9 +226,9 @@ The labeler is the frozen VLM with privileged access to the environment's source
 
 Labels are cached per screen hash and subtask, so each screen is labeled once. The body cross-checks labels against what is actually visible and reachable before they count.
 
-## Rewards
+## Rewards (RL fine-tuning stage)
 
-Two separate terms, each training its own part of the action.
+Two separate terms, each training its own part of the action. They are used after the supervised heads work.
 
 ### Segmentation reward (trains level and cells)
 
@@ -288,7 +309,11 @@ Training rules:
 | Risk | Mitigation |
 | --- | --- |
 | World model does not generalize across adapters | Many adapters per environment, degraded variants, no adapter ID, held-out evaluation |
-| Labeler mistakes | Body cross-checks visibility and reachability; labels cached and inspectable |
+| Labels reward System 1 for agreeing with itself | Hindsight labels from verified environment success by default; the LLM labeler is optional and checked against success first |
+| Credit assignment over many cells | One supervised label per cell instead of one scalar reward for all cells; RL only fine-tunes afterwards |
+| Cost of LLM calls during training | Collect once, train offline as often as needed |
+| Unsolved tasks give no cell labels | Collect with System 2 executing; extend the dataset as more tasks are solved |
+| Dynamics may not matter on short MiniWoB tasks | Compare the world model heads with a plain classifier on the same data |
 | Qwen3.5 incompatible with System One caching or padding | Verify first once weights are added; fall back to no `cache_prefix` or Qwen3-VL-8B |
 | Latency stacking (vision pass, world model, System 1, body) | Measure in stage 1 before setting expected latencies |
 | Segmentation and routing collude | Separate reward heads, critics and action slices |
@@ -299,18 +324,20 @@ Open values to set:
 - Reward constants $a, b, p, q, \kappa, \beta, c, \epsilon$ and the expected latencies.
 - Grid sizes per level, and the hidden-state layer used as the text feature.
 - The System 1 spread threshold for the escalation rule.
+- The run-time escalation threshold, cell threshold and cell budget (suggested by the held-out sweep).
 - How many degraded adapter variants to use.
 
 ## Staged build plan (this phase)
 
 Each stage is usable on its own and gated on a measurable result.
 
-0. **Contract, protected core, log**, with the DOM adapter on MiniWoB++. *Gate:* the adapter passes the conformance suite.
-1. **System 1, goal context, hard escalation rule**, no training. *Gate:* task success and System 1 share measured against System 2 alone.
-2. **Labeler and both rewards**, scoring the rule-based behavior from stage 1. *Gate:* the rewards rank good and bad behavior correctly on hand-checked episodes.
-3. **Gym wrapper and world model** on VLM features, with route and levels 1 and 3. *Gate:* beats the stage 1 rules on success and latency.
-4. **More adapters** (accessibility, vision, degraded) **and WebArena**. *Gate:* little drop between adapters.
-5. **OSWorld VM and the held-out adapter**. *Gate:* held-out performance close to training adapters.
+0. **Contract, protected core, log**, with the DOM adapter on MiniWoB++. *Gate:* the adapter passes the conformance suite. (`scripts/check_adapters.py`)
+1. **System 1, goal context, hard escalation rule**, no training. *Gate:* task success, System 1 share and seconds per step, measured against System 2 alone. (`scripts/run_stage1.py`)
+2. **Collect** episodes on MiniWoB++ across adapters (DOM, accessibility, degraded), with both systems answering every step, plus a held-out-adapter set. *Gate:* enough successful episodes for cell labels, and a measured System 1 error rate. (`scripts/collect.py`)
+3. **Offline world model with supervised heads.** *Gate:* on held-out adapters, the cells head covers ≥95% of important targets with few cells, and the escalation head catches ≥90% of System 1 errors with little escalation; it also beats a plain classifier on the same data. (`scripts/train_offline.py`)
+4. **Online with the trained heads.** *Gate:* matches the stage 1 rules on success with fewer options shown and less System 2 use, including on the held-out adapter. (`scripts/run_stage1.py --policy heads`)
+5. **RL fine-tuning** in imagination with the two rewards, starting from the stage 3 model. *Gate:* improves on stage 4 without losing held-out performance. (`scripts/train_wm.py --init-from`)
+6. **WebArena and the OSWorld VM** (needs a cloud VM next to Colab). *Gate:* held-out performance close to training adapters.
 
 Next phase: train the LLM to create adapters, then teacher curriculum, mastery lists, skill promotion and new body types (games, VR, simulated robotics), as described in v1.
 

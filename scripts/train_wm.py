@@ -1,11 +1,14 @@
-"""Stage 3: train the world model (route, level, cells) with r2dreamer inside the whole system.
+"""Stage 5 (later): RL fine-tuning of the world model online, with the two rewards, inside the whole system.
+
+Start this only after the supervised heads work (scripts/train_offline.py). `--init-from` loads the
+offline checkpoint so the world model and its latent start trained; the actor then learns route, level
+and cells from r_seg and r_dec in imagination.
 
 The LLM, body and rewards run inside the environment worker; r2dreamer trains the two-head agent in the
 main process. Checkpoints are written every --save-every updates and on exit, and training resumes from
 `latest.pt` in the log directory (the replay buffer is not saved, so it refills after a resume).
 
-    python scripts/train_wm.py
-    python scripts/train_wm.py --set paths.runs=/content/drive/MyDrive/system-router/runs
+    python scripts/train_wm.py --init-from runs/offline/latest.pt
 """
 
 from __future__ import annotations
@@ -20,36 +23,7 @@ sys.path.insert(0, str(ROOT))
 from body.factory import make_grid  # noqa: E402
 from common.config import load_config, resolve  # noqa: E402
 from wm.codec import ActionCodec  # noqa: E402
-from wm.r2d import add_r2dreamer_to_path  # noqa: E402
-
-
-def compose_r2dreamer(cfg):
-    """r2dreamer's hydra config with this project's environment, sizes and log directory."""
-    from hydra import compose, initialize_config_dir
-    from omegaconf import OmegaConf
-
-    root = add_r2dreamer_to_path(cfg.paths.r2dreamer)
-    with initialize_config_dir(config_dir=str(root / "configs"), version_base=None):
-        conf = compose(config_name="configs", overrides=["env=crafter", f"model={cfg.dreamer.model}"])
-    OmegaConf.set_struct(conf, False)
-    d = cfg.dreamer
-    conf.device = d.device
-    conf.batch_size, conf.batch_length = int(d.batch_size), int(d.batch_length)
-    conf.logdir = str(resolve(cfg.paths.runs) / "wm")
-    conf.env.task = "router"
-    conf.env.steps = int(d.steps)
-    conf.env.env_num = 1          # one worker holds the LLM; a second would load another copy
-    conf.env.eval_episode_num = 0  # evaluation runs separately (held-out adapters)
-    conf.env.train_ratio = int(d.train_ratio)
-    conf.env.action_repeat = 1
-    for part in ("encoder", "decoder"):
-        conf.env[part].mlp_keys = "^(vis|txt|vec)$"
-        conf.env[part].cnn_keys = "$^"
-    conf.model.rep_loss = d.rep_loss
-    conf.model.imag_horizon = int(d.imag_horizon)
-    conf.model.compile = False
-    OmegaConf.resolve(conf)
-    return conf
+from wm.r2d import compose_r2dreamer  # noqa: E402
 
 
 def main() -> None:
@@ -58,10 +32,11 @@ def main() -> None:
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--save-every", type=int, default=1000, help="updates between checkpoints")
     parser.add_argument("--fresh", action="store_true", help="ignore an existing latest.pt")
+    parser.add_argument("--init-from", default=None, help="offline checkpoint (world model weights) to start from")
     args = parser.parse_args()
 
     cfg = load_config(args.config, args.set)
-    conf = compose_r2dreamer(cfg)
+    conf = compose_r2dreamer(cfg, logdir_name="wm_rl")
 
     import torch
     import tools  # r2dreamer
@@ -89,6 +64,11 @@ def main() -> None:
         agent.load_state_dict(state["agent_state_dict"])
         tools.recursively_load_optim_state_dict(agent, state["optims_state_dict"])
         print(f"Resumed from {checkpoint}")
+    elif args.init_from:
+        state = torch.load(resolve(args.init_from), map_location=conf.device)
+        missing, unexpected = agent.load_state_dict(state["agent_state_dict"], strict=False)
+        agent.clone_and_freeze()
+        print(f"Initialized from {args.init_from} ({len(missing)} missing, {len(unexpected)} unused keys)")
 
     def save() -> None:
         torch.save({"agent_state_dict": agent.state_dict(),

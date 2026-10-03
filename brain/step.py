@@ -127,22 +127,59 @@ class Brain:
             "vec": vec,
         }
 
-    # ------------------------------------------------------------------ one step
-    def step(self, decision: Decision) -> StepReport:
-        body, cfg = self.body, self.cfg
-        body.begin_step()
-        observation = body.observe(decision.level, decision.cells)
+    # ------------------------------------------------------------------ step parts
+    def _begin(self, decision: Decision) -> tuple[Observation, str, np.ndarray, bool]:
+        """Start timing, narrow the view, and plan first if there is no task list (or it stalled)."""
+        self.body.begin_step()
+        observation = self.body.observe(decision.level, decision.cells)
         state_text = self.state_text(observation)
-        image = observation.image
-
         forced_plan = False
         if not self.goal.has_plan or self.goal.needs_replan:
-            self.goal.set_plan(self.system2.plan(self.goal.goal, state_text, self.log.history_text(), image))
+            self.goal.set_plan(self.system2.plan(self.goal.goal, state_text, self.log.history_text(), observation.image))
             self.system1.set_stable(self.goal.stable_text())
             self.system1.begin_step(self.last_outcome_text)
             forced_plan = True
+        return observation, state_text, observation.image, forced_plan
 
-        # Label the screen the decision was made on (training only, cached per screen and subtask).
+    def _ask_system1(self, observation: Observation, state_text: str) -> tuple[dict, str, float]:
+        answers = self.system1.ask(state_text, self.questions(observation))
+        navigation = {q: a.key for q, a in answers.items() if q != "action"}
+        return navigation, answers["action"].key, min(a.confidence for a in answers.values())
+
+    def _ask_system2(self, observation: Observation, state_text: str, image) -> tuple[dict, str, Optional[str]]:
+        s2 = self.system2.decide(self.goal, observation, state_text, self.log.history_text(), image)
+        if s2.replan:
+            self.goal.set_plan(s2.replan)
+        return s2.navigation, s2.action, s2.arg
+
+    def _execute(self, navigation: dict, action: str, arg: Optional[str]):
+        """Act, then let the protected core check the subtask. Returns (outcome, at_before, acted_target, done)."""
+        body = self.body
+        if action != NONE and action.startswith("type@") and arg is None and self.goal.current is not None:
+            arg = self.goal.current.arg
+        at_before = body.at.id if body.at is not None else None
+        acted_target = body._find(action.partition("@")[2]) if action != NONE else None
+        outcome = body.act(navigation, action, arg)
+        self.goal.tick(int(self.cfg.goal.stall_steps))
+        if self.goal.current is not None and body.check(self.goal.current.condition):
+            self.goal.advance()
+        self.steps += 1
+        done = bool(outcome.env_done or self.goal.done or self.steps >= int(self.cfg.env.max_steps))
+        return outcome, at_before, acted_target, done
+
+    def _remember(self, outcome: Outcome, confidence: Optional[float], route_used: str) -> None:
+        self.last_outcome_text = outcome.text()
+        self.last_confidence = confidence if confidence is not None else 0.0
+        self.last_route = 1 if route_used == "s2" else 0
+        self.last_nav_status = outcome.navigation.status
+        self.last_action_failed = outcome.action.status == "failed"
+
+    # ------------------------------------------------------------------ one step (deployment and stage 1)
+    def step(self, decision: Decision) -> StepReport:
+        body, cfg = self.body, self.cfg
+        observation, state_text, image, forced_plan = self._begin(decision)
+
+        # Label the screen the decision was made on (optional, cached per screen and subtask).
         label: Optional[Label] = None
         if self.labeler is not None and self.goal.current is not None:
             label = self.labeler.label(body.describe_source(), self.goal.goal, self.goal.current.text, body.targets)
@@ -151,31 +188,13 @@ class Brain:
         escalated, confidence = False, None
         navigation, action, arg = {}, NONE, None
         if route_used == "s1":
-            answers = self.system1.ask(state_text, self.questions(observation))
-            confidence = min(a.confidence for a in answers.values())
+            navigation, action, confidence = self._ask_system1(observation, state_text)
             if confidence < float(cfg.system1.escalate_below):
                 escalated, route_used = True, "s2"  # hard rule: the router's mistakes are caught here
-            else:
-                navigation = {q: a.key for q, a in answers.items() if q != "action"}
-                action = answers["action"].key
         if route_used == "s2":
-            s2 = self.system2.decide(self.goal, observation, state_text, self.log.history_text(), image)
-            if s2.replan:
-                self.goal.set_plan(s2.replan)
-            navigation, action, arg = s2.navigation, s2.action, s2.arg
+            navigation, action, arg = self._ask_system2(observation, state_text, image)
 
-        if action != NONE and action.startswith("type@") and arg is None and self.goal.current is not None:
-            arg = self.goal.current.arg
-        at_before = body.at.id if body.at is not None else None
-        acted_target = body._find(action.partition("@")[2]) if action != NONE else None
-        outcome = body.act(navigation, action, arg)
-
-        # Completion and stall (protected core checks the subtask's condition).
-        self.goal.tick(int(cfg.goal.stall_steps))
-        if self.goal.current is not None and body.check(self.goal.current.condition):
-            self.goal.advance()
-        self.steps += 1
-        done = bool(outcome.env_done or self.goal.done or self.steps >= int(cfg.env.max_steps))
+        outcome, at_before, acted_target, done = self._execute(navigation, action, arg)
 
         # Rewards.
         r_seg, seg_info, correct = 0.0, {}, None
@@ -199,15 +218,58 @@ class Brain:
             "r_seg": r_seg, "r_dec": r_dec, **body.last_exec,
         })
 
-        self.last_outcome_text = outcome.text()
-        self.last_confidence = confidence if confidence is not None else 0.0
-        self.last_route = 1 if route_used == "s2" else 0
-        self.last_nav_status = outcome.navigation.status
-        self.last_action_failed = outcome.action.status == "failed"
+        self._remember(outcome, confidence, route_used)
         return StepReport(decision=decision, route_used=route_used, escalated=escalated, forced_plan=forced_plan,
                           navigation=navigation, action=action, outcome=outcome, s1_confidence=confidence,
                           correct=correct, r_seg=r_seg, r_dec=r_dec, seg_info=seg_info, done=done,
                           success=outcome.env_success)
+
+    # ------------------------------------------------------------------ one step (data collection)
+    def collect_step(self, decision: Decision, execute: str = "s2") -> tuple[StepReport, dict]:
+        """Both systems answer every step; one of them is executed. Returns the report and a record for hindsight labels.
+
+        execute: "s2" (System 2's decision runs, most successes), "s1" (System 1 runs with the usual
+        escalation rule), or "mix" (System 1 or System 2 at random).
+        """
+        body = self.body
+        observation, state_text, image, forced_plan = self._begin(decision)
+        anchor = body.frame.anchor
+        positions = {t.id: list(t.center) for t in body.targets}  # where every target was when deciding
+
+        s1_nav, s1_action, confidence = self._ask_system1(observation, state_text)
+        s2_nav, s2_action, s2_arg = self._ask_system2(observation, state_text, image)
+        if execute == "mix":
+            execute = "s1" if self.rng.random() < 0.5 else "s2"
+        if execute == "s1" and not forced_plan and confidence >= float(self.cfg.system1.escalate_below):
+            route_used, navigation, action, arg = "s1", s1_nav, s1_action, None
+        else:
+            route_used, navigation, action, arg = "s2", s2_nav, s2_action, s2_arg
+
+        outcome, at_before, acted_target, done = self._execute(navigation, action, arg)
+        nav_choice = navigation.get("navigate", navigation.get("destination"))
+        record = {
+            "step": self.steps,
+            "adapters": self.adapter_names,
+            "anchor": list(anchor),
+            "positions": positions,
+            "s1": {"navigation": s1_nav, "action": s1_action, "confidence": confidence},
+            "s2": {"navigation": s2_nav, "action": s2_action},
+            "executed": route_used,
+            "forced_plan": forced_plan,
+            "nav_target": nav_choice if nav_choice in positions else None,
+            "acted_target": acted_target.id if acted_target is not None and acted_target.kind == "element" else None,
+            "action_status": outcome.action.status,
+            "nav_status": outcome.navigation.status,
+            "latency_ms": outcome.latency_ms,
+            "done": done,
+            "success": outcome.env_success,
+        }
+        self.log.write({**record, "positions": len(positions), "outcome": outcome.text(), **body.last_exec})
+        self._remember(outcome, confidence, route_used)
+        report = StepReport(decision=decision, route_used=route_used, escalated=False, forced_plan=forced_plan,
+                            navigation=navigation, action=action, outcome=outcome, s1_confidence=confidence,
+                            correct=None, r_seg=0.0, r_dec=0.0, done=done, success=outcome.env_success)
+        return report, record
 
     # ------------------------------------------------------------------ prompts
     def state_text(self, observation: Observation) -> str:

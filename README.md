@@ -31,12 +31,18 @@ brain/          the frozen-LLM roles
   step.py         Brain: one step of the whole system
 wm/             the trained part
   codec.py        flat action [route | level | cells] and masks
-  rewards.py      r_seg and r_dec
+  dataset.py      collected episodes and the sequence sampler
+  hindsight.py    labels from verified success: important cells, System 1 wrong
+  supervised.py   world model + cells head + escalation head (offline)
+  baseline.py     the same heads without the world model
+  evaluate.py     held-out sweep that suggests thresholds and cell budget
+  heads_policy.py run-time routing and segmentation from the heads
+  rewards.py      r_seg and r_dec (RL fine-tuning)
   rules.py        stage-1 rules in place of the world model
   gym_env.py      the whole system as an r2dreamer environment
-  agent.py        r2dreamer with two reward heads and two critics
+  agent.py        r2dreamer with two reward heads and two critics (RL fine-tuning)
 environments/   MiniWoB++ (WebArena and OSWorld come in stages 4-5)
-scripts/        check_adapters.py, run_stage1.py, train_wm.py
+scripts/        check_adapters, run_stage1, collect, train_offline, train_wm
 configs/        default.yaml (paths, model, grid, rewards, environments)
 notebooks/      colab.ipynb
 system one/     submodule: sgoedecke/system-one (reference for the System 1 method)
@@ -58,13 +64,22 @@ On an 8 GB GPU use `--set paths.model=Qwen/Qwen3.5-4B --set llm.quantization=4bi
 
 ## Running the stages
 
+The world model is trained **supervised first, on data collected once**, then fine-tuned with RL:
+
 ```bash
-python -m pytest -q tests                                  # contract, rewards, codec (no model, no browser)
-python scripts/check_adapters.py --adapters dom a11y "degraded:dom"   # stage 0 gate
-python scripts/run_stage1.py --episodes 20 --route s1      # stage 1-2: rules, System 1 + escalation
-python scripts/run_stage1.py --episodes 20 --route s2      # baseline: System 2 alone
-python scripts/train_wm.py                                 # stage 3: train the world model
+python -m pytest -q tests                                            # no model, no browser
+python scripts/check_adapters.py --adapters dom a11y "degraded:dom"  # 0: contract conformance
+python scripts/run_stage1.py --episodes 20 --route s1                # 1: rules, System 1 + escalation
+python scripts/run_stage1.py --episodes 20 --route s2                #    baseline: System 2 alone
+python scripts/collect.py --episodes 500                             # 2: both systems answer every step
+python scripts/collect.py --episodes 100 --heldout                   #    held-out adapters, for evaluation
+python scripts/train_offline.py                                      # 3: world model + supervised heads (no LLM)
+python scripts/train_offline.py --baseline                           #    plain classifier to compare against
+python scripts/run_stage1.py --episodes 20 --policy heads            # 4: online with the trained heads
+python scripts/train_wm.py --init-from runs/offline/latest.pt        # 5: RL fine-tuning (later)
 ```
+
+Labels for stage 3 come from hindsight. Important cells are where the agent actually acted in episodes MiniWoB marked successful. "System 1 wrong" means System 1 disagreed with System 2 on the same step. `train_offline.py` writes `tuning.json` with suggested thresholds, which stage 4 reads.
 
 Any config value can be overridden with `--set key=value`, for example `--set env.adapter_pool='[[dom],[a11y],["degraded:dom"]]'` to train across adapters.
 

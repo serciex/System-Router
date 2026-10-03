@@ -58,9 +58,35 @@ env:
   vision_weights: "models/OmniParser"  # OmniParser weights (added later)
 
 labeler:
-  enabled: true                    # training only; stage 1 can run without it
+  enabled: false                   # optional LLM labeler; hindsight labels are the default (stage 2-3)
 
-dreamer:                           # overrides applied to r2dreamer's hydra config
+collect:                           # stage 2: both systems answer every step, one is executed
+  episodes: 500
+  execute: s2                      # s2 (most successes) | s1 (with the escalation rule) | mix
+  out: "runs/dataset"              # train/ and heldout/ subfolders
+
+hindsight:
+  s1_reference: s2                 # s2: System 1 is wrong when it disagrees with System 2 | path: not on the successful path
+
+offline:                           # stage 3: world model + supervised heads, no LLM needed
+  steps: 20000
+  batch_size: 16
+  batch_length: 16
+  eval_every: 1000
+  loss_scales: {cells: 1.0, escalate: 1.0}
+  target_recall: 0.95              # tuning: fewest cells that still cover this share of important targets
+  target_caught: 0.9               # tuning: least escalation that still catches this share of System 1 errors
+
+heads:                             # stage 4: run-time policy from the trained heads
+  checkpoint: "runs/offline/latest.pt"
+  use_tuning: true                 # take thresholds from tuning.json next to the checkpoint
+  level: 3
+  escalate_threshold: 0.5
+  cell_threshold: 0.3
+  min_cells: 1
+  max_cells: 12
+
+dreamer:                           # overrides applied to r2dreamer's hydra config (also used offline)
   model: size12M
   rep_loss: r2dreamer
   device: "cuda:0"
