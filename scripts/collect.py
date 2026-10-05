@@ -1,4 +1,6 @@
-"""Stage 2: collect episodes once, with System 1 and System 2 both answering every step.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Stage 2: collect episodes once, with System 1 and System 2 both answering every step.
 
 The expensive LLM calls happen here, once. The world model then trains offline on the saved data
 (scripts/train_offline.py) as many times as needed. Segmentation uses the stage-1 rule (every cell that

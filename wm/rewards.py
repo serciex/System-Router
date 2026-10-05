@@ -1,4 +1,6 @@
-"""The two reward terms (spec v2, "Rewards").
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+The two reward terms (spec v2, "Rewards").
 
 Segmentation (trains level and cells):
     r_seg = beta * recall_important - c * n_unimportant - eps * n_options

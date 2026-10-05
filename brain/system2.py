@@ -1,4 +1,6 @@
-"""System 2: deliberate reasoning with the image. Plans the task list, or picks when System 1 is unsure.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+System 2: deliberate reasoning with the image. Plans the task list, or picks when System 1 is unsure.
 
 Outputs are JSON so they can be validated: every chosen key must be one of the offered options, and
 every subtask carries a checkable completion condition the protected core can evaluate.

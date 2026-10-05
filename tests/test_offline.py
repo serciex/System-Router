@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.skip(reason="v2 world-model design, obsolete under spec v3")
+
 import numpy as np
 
 from body.grid import Grid

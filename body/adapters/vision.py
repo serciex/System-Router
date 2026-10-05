@@ -1,4 +1,6 @@
-"""Vision-only adapter: interactable elements detected from pixels (e.g. OmniParser).
+"""PENDING PORT to contract v0.3 (still uses the v0.2 adapter interface). Not used by the v3 loop.
+
+Vision-only adapter: interactable elements detected from pixels (e.g. OmniParser).
 
 Environment-independent: it needs a `detector(image) -> list[dict]` and a screen object with
 `image`, `pointer`, `click_at(x, y)`, `type_text(text)`, `point(x, y)` and `scroll(direction)`

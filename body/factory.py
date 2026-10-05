@@ -1,59 +1,39 @@
-"""Build a Body from config: adapter names like "dom", "a11y", "vision", "degraded:dom"."""
+"""Build a body from config: one integration (sensory channel) plus one adapter (interaction channel)."""
 
 from __future__ import annotations
 
-import random
-
-from common.config import Config, resolve
+from common.config import Config
 
 from .adapters.base import Adapter
 from .contract import Body
 from .core import Core
-from .grid import Grid
-
-
-def make_grid(cfg: Config) -> Grid:
-    return Grid(sizes=dict(cfg.grid.sizes), levels=list(cfg.grid.levels), level1_span=float(cfg.grid.level1_span))
 
 
 def make_core(cfg: Config) -> Core:
-    return Core(allow_irreversible=bool(cfg.limits.allow_irreversible), allowed_verbs=tuple(cfg.limits.allowed_verbs))
+    return Core(allow_irreversible=bool(cfg.limits.allow_irreversible), allowed_verbs=tuple(cfg.limits.allowed_verbs),
+                change_threshold=float(cfg.loop.change_threshold), think_below=float(cfg.loop.think_below),
+                goal_max_age=int(cfg.loop.goal_max_age))
 
 
-def make_adapter(name: str, environment, cfg: Config, seed: int = 0) -> Adapter:
-    if name.startswith("degraded:"):
-        from .adapters.degraded import DegradedAdapter
+def make_adapter(name: str, integration, cfg: Config) -> Adapter:
+    if name == "web":
+        from .adapters.miniwob_dom import MiniWoBDomAdapter
 
-        degraded = cfg.env.degraded
-        return DegradedAdapter(make_adapter(name.split(":", 1)[1], environment, cfg, seed),
-                               drop=degraded.drop, jitter=degraded.jitter, blank_label=degraded.blank_label, seed=seed)
-    if cfg.env.suite == "miniwob":
-        if name == "dom":
-            from .adapters.miniwob_dom import MiniWoBDomAdapter
+        return MiniWoBDomAdapter(integration, collapse_over=int(cfg.loop.collapse_over))
+    if name == "fallback":
+        from .adapters.fallback import FallbackAdapter
 
-            return MiniWoBDomAdapter(environment)
-        if name == "a11y":
-            from .adapters.miniwob_a11y import MiniWoBA11yAdapter
+        return FallbackAdapter(integration)
+    if name == "code":
+        from .adapters.code_workspace import CodeWorkspaceAdapter
 
-            return MiniWoBA11yAdapter(environment)
-        if name == "vision":
-            from .adapters.omniparser import load_omniparser
-            from .adapters.vision import VisionAdapter
-
-            return VisionAdapter(environment, load_omniparser(resolve(cfg.env.vision_weights)))
-    raise ValueError(f"Unknown adapter {name!r} for suite {cfg.env.suite!r}")
+        return CodeWorkspaceAdapter(integration)
+    raise ValueError(f"Unknown adapter {name!r}; v0.2 adapters (a11y, vision, degraded) are not ported yet")
 
 
-def pick_adapters(cfg: Config, rng: random.Random, evaluate: bool = False) -> list[str]:
-    """One adapter set per episode: from the pool in training, the held-out sets in evaluation."""
-    if evaluate and cfg.env.heldout_adapters:
-        return list(rng.choice(list(cfg.env.heldout_adapters)))
-    pool = [list(s) for s in cfg.env.adapter_pool] if cfg.env.adapter_pool else [list(cfg.env.adapters)]
-    heldout = [list(s) for s in cfg.env.heldout_adapters]
-    pool = [s for s in pool if s not in heldout] or pool
-    return rng.choice(pool)
-
-
-def make_body(cfg: Config, environment, adapter_names: list[str], seed: int = 0) -> Body:
-    adapters = [make_adapter(name, environment, cfg, seed) for name in adapter_names]
-    return Body(adapters, make_grid(cfg), make_core(cfg))
+def make_body(cfg: Config, integration, adapter_name: str) -> Body:
+    loop = cfg.loop
+    return Body(integration, make_adapter(adapter_name, integration, cfg), make_core(cfg),
+                body_id=f"{cfg.env.suite}:{adapter_name}", wait_cap_s=float(loop.wait_cap_s),
+                wait_poll_s=float(loop.wait_poll_s), narrow_min_px=int(loop.narrow_min_px),
+                narrow_max_depth=int(loop.narrow_max_depth))

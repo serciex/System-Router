@@ -1,4 +1,6 @@
-"""Stage 3: train the world model and its two supervised heads offline, then tune the run-time thresholds.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Stage 3: train the world model and its two supervised heads offline, then tune the run-time thresholds.
 
 No LLM is loaded here: training only reads the collected episodes. Episodes collected with --heldout
 (held-out adapters) are used for evaluation, so the numbers measure transfer to an unseen adapter.

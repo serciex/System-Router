@@ -1,4 +1,6 @@
-"""Stage-1 policy: hand-written rules in place of the world model (no training).
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Stage-1 policy: hand-written rules in place of the world model (no training).
 
 Route to System 1 (System 2 still plans first and catches low-confidence steps through the hard rule),
 or to System 2 always for the reasoning-only baseline. Segment at the finest active level, selecting

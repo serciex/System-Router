@@ -1,24 +1,28 @@
-"""Conformance checks every adapter must pass before the world model uses it (CONTRACT.md).
+"""Conformance checks for v0.3 adapters (CONTRACT.md). Run by the protected core, never by the LLM.
 
-Each check returns (passed, detail). `run_conformance` runs the environment-independent ones;
-`check_faithful` needs a known test element and an expected state change, supplied per environment.
+`run_conformance` runs the public checks plus every module in the hidden split directory. A hidden
+module defines `checks(adapter, integration) -> dict[str, tuple[bool, str]]` and lives outside any workspace.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
-
-import numpy as np
+from pathlib import Path
+from typing import Callable, Optional
 
 from .adapters.base import Adapter
-from .schema import CONTRACT_VERSION, Frame
+from .core import changed
+from .schema import CONTRACT_VERSION, Item
+from .vocab import POINTER_MODES, ROLES, VERBS, meaningful
+
+Check = tuple[bool, str]
 
 
 @dataclass
 class Report:
     adapter: str
-    results: dict[str, tuple[bool, str]] = field(default_factory=dict)
+    results: dict[str, Check] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -30,82 +34,120 @@ class Report:
         return "\n".join(lines)
 
 
-def check_version(adapter: Adapter) -> tuple[bool, str]:
-    version = adapter.capabilities().contract_version
-    return version == CONTRACT_VERSION, f"adapter {version}, contract {CONTRACT_VERSION}"
+def check_manifest(adapter: Adapter) -> Check:
+    m = adapter.manifest()
+    if m.contract_version != CONTRACT_VERSION:
+        return False, f"targets contract {m.contract_version}, expected {CONTRACT_VERSION}"
+    if m.pointer_mode not in POINTER_MODES:
+        return False, f"unknown pointer mode {m.pointer_mode!r}"
+    bad = [v for v in m.verbs + m.self_verbs if v not in VERBS]
+    return (not bad), (f"non-canonical verbs {bad}" if bad else f"{len(m.verbs)} verbs")
 
 
-def check_schema(frame: Frame) -> tuple[bool, str]:
-    if frame.image is None or frame.image.ndim != 3 or frame.image.shape[2] != 3:
-        return False, "frame image must be (H, W, 3)"
-    ax, ay = frame.anchor
-    if not (0.0 <= ax <= 1.0 and 0.0 <= ay <= 1.0):
-        return False, f"anchor {frame.anchor} is not normalized"
-    for element in frame.elements:
-        x0, y0, x1, y1 = element.bbox
+def check_items(items: list[Item]) -> Check:
+    for item in items:
+        x0, y0, x1, y1 = item.bbox
         if not (0.0 <= x0 <= x1 <= 1.0 and 0.0 <= y0 <= y1 <= 1.0):
-            return False, f"element {element.label!r} has a box outside the view: {element.bbox}"
-        if not 0.0 <= element.confidence <= 1.0:
-            return False, f"element {element.label!r} has confidence {element.confidence}"
-    return True, f"{len(frame.elements)} elements"
+            return False, f"{item.name!r} box outside the window: {item.bbox}"
+        if item.role not in ROLES:
+            return False, f"{item.name!r} has non-canonical role {item.role!r}"
+        if any(v not in VERBS for v in item.verbs):
+            return False, f"{item.name!r} has non-canonical verbs {item.verbs}"
+        if item.kind not in ("element", "surface", "group"):
+            return False, f"{item.name!r} has unknown kind {item.kind!r}"
+        if item.kind == "surface" and item.dims not in (1, 2):
+            return False, f"surface {item.name!r} needs dims 1 or 2"
+        if not meaningful(item.name):
+            return False, f"item name {item.name!r} is not meaningful"
+        if not 0.0 <= item.confidence <= 1.0:
+            return False, f"{item.name!r} confidence {item.confidence}"
+    return True, f"{len(items)} items"
 
 
-def check_stable_ids(adapter: Adapter) -> tuple[bool, str]:
-    if not adapter.capabilities().stable_ids:
-        return True, "adapter declares unstable ids; the contract tracks them by position"
-    first = [(e.handle, e.label) for e in adapter.read().elements]
-    second = [(e.handle, e.label) for e in adapter.read().elements]
-    return first == second, "handles identical across two reads" if first == second else "handles changed with no action"
+def check_stable(adapter: Adapter) -> Check:
+    first = [(repr(i.handle), i.name) for i in adapter.find()]
+    second = [(repr(i.handle), i.name) for i in adapter.find()]
+    return first == second, "same handles for an unchanged window" if first == second else "handles changed with no action"
 
 
-def check_reset(adapter: Adapter, seed: int = 0) -> tuple[bool, str]:
-    first = adapter.reset(seed)
-    labels_a = sorted(e.label for e in first.elements)
-    second = adapter.reset(seed)
-    labels_b = sorted(e.label for e in second.elements)
-    return labels_a == labels_b, "same first observation for the same seed" if labels_a == labels_b else "reset is not reproducible"
+def check_scope(adapter: Adapter) -> Check:
+    groups = [i for i in adapter.find() if i.kind == "group"]
+    if not groups:
+        return True, "no groups to expand"
+    children = adapter.find(groups[0].handle)
+    ok = bool(children) and len(children) <= max(groups[0].collapsed, len(children))
+    return ok, f"expanding {groups[0].name!r} returned {len(children)} items"
 
 
-def check_movement(adapter: Adapter) -> tuple[bool, str]:
-    caps = adapter.capabilities()
-    if caps.pointer == "absolute":
-        res = adapter.point(0.25, 0.25)
-        anchor = adapter.read().anchor
-        ok = res.get("ok", False) and abs(anchor[0] - 0.25) < 0.05 and abs(anchor[1] - 0.25) < 0.05
-        return ok, f"pointer landed at {anchor}"
-    for axis, inputs in caps.movement_axes.items():
-        for name in inputs:
-            if name == "hold":
-                continue
-            before = adapter.read()
-            adapter.move({axis: name})
-            after = adapter.read()
-            moved = before.anchor != after.anchor or float(np.mean(np.abs(
-                before.image.astype(np.int16) - after.image.astype(np.int16)))) > 0.5
-            if not moved:
-                return False, f"movement input {axis}={name} produced no observable change"
-    return True, "every movement input changed the anchor or view"
+def check_surface(adapter: Adapter, integration, tolerance: float = 0.05) -> Check:
+    surfaces = [i for i in adapter.find() if i.kind == "surface" and "hover" in i.verbs]
+    if not surfaces:
+        return True, "no hoverable surfaces"
+    s = surfaces[0]
+    target = ((s.bbox[0] + s.bbox[2]) / 2, (s.bbox[1] + s.bbox[3]) / 2)
+    adapter.act_at(s.handle, [target], "hover")
+    pointer = integration.observe().pointer
+    if pointer is None:
+        return True, "integration has no pointer readback"
+    ok = abs(pointer[0] - target[0]) <= tolerance and abs(pointer[1] - target[1]) <= tolerance
+    return ok, f"pointer at {pointer}, requested {target}"
 
 
-def check_faithful(adapter: Adapter, handle: Any, verb: str, expect: Callable[[Frame, dict], bool],
-                   arg: Optional[str] = None) -> tuple[bool, str]:
+def check_faithful(adapter: Adapter, integration, handle, verb: str, arg: Optional[str] = None) -> Check:
+    before = integration.observe().image
     res = adapter.invoke(handle, verb, arg)
-    ok = bool(res.get("ok")) and expect(adapter.read(), res)
-    return ok, f"{verb} on {handle!r} -> {res.get('text')}"
+    after = integration.observe().image
+    ok = bool(res.get("ok")) and (changed(before, after) or bool(res.get("reward")) or bool(res.get("done")))
+    return ok, f"{verb} -> {res.get('text')}"
 
 
-def check_honest(adapter: Adapter, handle: Any, verb: str, truth: Callable[[], bool],
-                 arg: Optional[str] = None) -> tuple[bool, str]:
-    res = adapter.invoke(handle, verb, arg)
-    reported, actual = bool(res.get("ok")), bool(truth())
-    return reported == actual, f"reported ok={reported}, observed {actual}"
+def check_coverage(adapter: Adapter, integration, detector: Callable, minimum: float = 0.6) -> Check:
+    detected = detector(integration.observe().image)
+    if not detected:
+        return True, "detector found nothing"
+    items = adapter.find()
+
+    def covered(box) -> bool:
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        return any(i.bbox[0] <= cx <= i.bbox[2] and i.bbox[1] <= cy <= i.bbox[3] for i in items)
+
+    fraction = sum(covered(d["bbox"]) for d in detected) / len(detected)
+    return fraction >= minimum, f"{fraction:.0%} of detected elements covered"
 
 
-def run_conformance(adapter: Adapter, seed: int = 0) -> Report:
+def check_reset(adapter: Adapter, integration, seed: int = 0) -> Check:
+    integration.reset(seed)
+    adapter.reset(seed)
+    a = sorted(i.name for i in adapter.find())
+    integration.reset(seed)
+    adapter.reset(seed)
+    b = sorted(i.name for i in adapter.find())
+    return a == b, "same first state for the same seed" if a == b else "reset is not reproducible"
+
+
+def _hidden(directory: Optional[str | Path], adapter: Adapter, integration) -> dict[str, Check]:
+    results: dict[str, Check] = {}
+    if not directory or not Path(directory).exists():
+        return results
+    for path in sorted(Path(directory).glob("*.py")):
+        spec = importlib.util.spec_from_file_location(f"hidden_{path.stem}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for name, outcome in module.checks(adapter, integration).items():
+            results[f"hidden:{name}"] = outcome
+    return results
+
+
+def run_conformance(adapter: Adapter, integration, seed: int = 0, hidden_dir: Optional[str | Path] = None,
+                    detector: Optional[Callable] = None) -> Report:
     report = Report(adapter.name)
-    report.results["version"] = check_version(adapter)
-    report.results["reset"] = check_reset(adapter, seed)
-    report.results["schema"] = check_schema(adapter.read())
-    report.results["stable_ids"] = check_stable_ids(adapter)
-    report.results["movement"] = check_movement(adapter)
+    report.results["manifest"] = check_manifest(adapter)
+    report.results["reset"] = check_reset(adapter, integration, seed)
+    report.results["items"] = check_items(adapter.find())
+    report.results["stable"] = check_stable(adapter)
+    report.results["scope"] = check_scope(adapter)
+    report.results["surface"] = check_surface(adapter, integration)
+    if detector is not None:
+        report.results["coverage"] = check_coverage(adapter, integration, detector)
+    report.results.update(_hidden(hidden_dir, adapter, integration))
     return report

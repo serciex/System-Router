@@ -1,8 +1,7 @@
-"""The goal context: one per goal, holding the goal, System 2's task list and the current subtask.
+"""The goal context: the goal, think's task list, the current subtask and the latest word goal.
 
-Ordered so the stable part (goal, plan, current subtask) is a fixed prefix System 1 can cache across
-steps. The subtask is swapped when its condition passes; the whole context is wiped when the goal
-completes. System 2 replans from the step log, never from this context.
+Rendered into the prompt's goals section. The subtask is swapped when its condition passes; the word
+goal is dropped when the window changes or it gets too old; everything is wiped when the goal ends.
 """
 
 from __future__ import annotations
@@ -25,6 +24,14 @@ class GoalContext:
     index: int = 0
     steps_on_subtask: int = 0
     needs_replan: bool = False
+    word_goal: Optional[str] = None  # from the last think
+    word_goal_tick: int = 0
+
+    def set_word_goal(self, text: Optional[str], tick: int) -> None:
+        self.word_goal, self.word_goal_tick = text, tick
+
+    def drop_word_goal(self) -> None:
+        self.word_goal = None
 
     @property
     def has_plan(self) -> bool:
@@ -59,6 +66,7 @@ class GoalContext:
         self.index = 0
         self.steps_on_subtask = 0
         self.needs_replan = False
+        self.word_goal = None
 
     def stable_text(self) -> str:
         """The cached prefix: goal, plan, current subtask. Changes only on replan or subtask swap."""

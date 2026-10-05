@@ -1,8 +1,7 @@
-"""Load the one frozen VLM (Qwen3.5) shared by System 1, System 2, the labeler and the feature extractor.
+"""Load the one VLM (Qwen3.5) used for act, think and grounding.
 
-Qwen3.5 is natively multimodal (`Qwen3_5ForConditionalGeneration`), so it loads through the image-text
-model class and its processor. A text-only causal LM also works (System 2 then runs without images and
-vision features are zeros). Needs a recent `transformers` (Qwen3.5 support landed in 2026).
+Qwen3.5 is natively multimodal, so it loads through the image-text model class and its processor. A
+text-only causal LM also works (without the screen). Needs a recent `transformers`.
 """
 
 from __future__ import annotations

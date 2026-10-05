@@ -1,4 +1,6 @@
-"""Accessibility-tree adapter for MiniWoB++: same page, described by the browser's accessibility tree.
+"""PENDING PORT to contract v0.3 (still uses the v0.2 adapter interface). Not used by the v3 loop.
+
+Accessibility-tree adapter for MiniWoB++: same page, described by the browser's accessibility tree.
 
 Reads Chrome's accessibility tree through the Chrome DevTools Protocol (Selenium `execute_cdp_cmd`),
 so labels are roles and accessible names rather than DOM tags and text. Interaction goes through

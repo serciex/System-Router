@@ -1,4 +1,6 @@
-"""The whole system as an environment for r2dreamer (its old-gym API: reset() -> obs, step() -> obs, r, done, info).
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+The whole system as an environment for r2dreamer (its old-gym API: reset() -> obs, step() -> obs, r, done, info).
 
 The world model only sees and chooses what the spec says it does:
     observation: vis (VLM patch cells), txt (VLM hidden state), vec (cheap numbers)

@@ -1,4 +1,6 @@
-"""Run the whole system online and measure it.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Run the whole system online and measure it.
 
 Stage 1 uses hand-written rules instead of the world model (no training); stage 4 uses the trained
 supervised heads with the thresholds from tuning.json. Gate for both: task success, System 1 share and

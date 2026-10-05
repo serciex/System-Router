@@ -1,4 +1,6 @@
-"""Window-normalized grids per level, defined by the contract (never by adapters).
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Window-normalized grids per level, defined by the contract (never by adapters).
 
 Level 1 is a 3x3 block centered on the anchor: the 8 outer cells are directions, the center is "here".
 Higher levels tile the whole view.

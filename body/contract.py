@@ -1,329 +1,282 @@
-"""The contract, built once and shared by every environment (CONTRACT.md v0.2).
+"""The body (CONTRACT.md v0.3): sensory channel from integration, interaction channel from the adapter.
 
-`Body` merges adapter output into targets with stable IDs, filters them by the world model's level and
-cells, builds the options of the two decision models (navigation and action), and executes their choices
-in the same step. Adapters only translate; everything here is environment-independent.
+`Body` keeps the body slot (latest find), stable brain-facing ids and canonical labels, builds the options
+of the two questions, runs narrowing on surfaces, executes picks (action first, then navigation), and
+runs wait. The core actions think and find are dispatched by the brain; find executes here.
 """
 
 from __future__ import annotations
 
+import time
+from dataclasses import replace
 from typing import Any, Optional
-
-import numpy as np
 
 from .adapters.base import Adapter
 from .core import CheckState, Core
-from .grid import Grid, iou
+from .narrowing import Narrowing
 from .schema import (
+    CONTRACT_VERSION,
     HOLD,
+    KEEP,
     NONE,
     ActionOutcome,
-    Capabilities,
-    Frame,
-    NativeElement,
+    Item,
+    Manifest,
     NavOutcome,
     Observation,
     Option,
     Outcome,
+    Point,
+    Slot,
     Target,
 )
-
-KEEP = "keep"  # relative mode: keep the current destination
+from .vocab import CORE_ACTIONS, label
 
 
 class Body:
-    def __init__(self, adapters: list[Adapter], grid: Grid, core: Core, self_verbs: tuple[str, ...] = ()):
-        if not adapters:
-            raise ValueError("A body needs at least one adapter")
-        self.adapters = list(adapters)
-        self.primary = self.adapters[0]
-        self.caps: Capabilities = self.primary.capabilities()
-        for adapter in self.adapters:
-            caps = adapter.capabilities()
-            if caps.contract_version != self.caps.contract_version:
-                raise ValueError(f"{adapter.name} targets contract {caps.contract_version}, body is {self.caps.contract_version}")
-        self.grid = grid
+    def __init__(self, integration, adapter: Adapter, core: Core, body_id: str = "body", version: str = "1",
+                 wait_cap_s: float = 2.0, wait_poll_s: float = 0.1, narrow_min_px: int = 12, narrow_max_depth: int = 6):
+        self.integration = integration
+        self.adapter = adapter
         self.core = core
-        self.self_verbs = tuple(self_verbs)
-        self._by_name = {adapter.name: adapter for adapter in self.adapters}
+        self.body_id, self.version = body_id, version
+        self.wait_cap_s, self.wait_poll_s = float(wait_cap_s), float(wait_poll_s)
+        self.narrow_min_px, self.narrow_max_depth = int(narrow_min_px), int(narrow_max_depth)
+        self.interaction = adapter.manifest()
+        if self.interaction.contract_version != CONTRACT_VERSION:
+            raise ValueError(f"{adapter.name} targets contract {self.interaction.contract_version}, body is {CONTRACT_VERSION}")
         self._reset_state()
 
     # ------------------------------------------------------------------ lifecycle
     def _reset_state(self) -> None:
-        self._ids: dict[tuple[str, Any], str] = {}
+        self._ids: dict[Any, str] = {}
         self._next_id = 1
+        self.tick = 0
         self.step = 0
-        self.frame: Optional[Frame] = None
-        self.targets: list[Target] = []
+        self.last_obs: Optional[Observation] = None
+        self.slot = Slot(targets=[])
+        self._find_image = None
         self.at: Optional[Target] = None
         self.destination: Optional[Target] = None
-        self.observation: Optional[Observation] = None
         self.env_success: Optional[bool] = None
         self.env_done = False
         self.last_exec: dict = {}
 
-    def reset(self, seed: Optional[int] = None) -> Frame:
+    def reset(self, seed: Optional[int] = None) -> Observation:
         self._reset_state()
-        self.primary.reset(seed)
-        return self.sense()
+        self.integration.reset(seed)
+        self.adapter.reset(seed)
+        obs = self.observe()
+        self.find()
+        return obs
 
     def close(self) -> None:
-        for adapter in self.adapters:
-            adapter.close()
+        self.adapter.close()
 
-    # ------------------------------------------------------------------ sensing
-    def sense(self) -> Frame:
-        """Read every adapter, merge, and assign stable IDs. Called at the start of each step and after acting."""
-        frames = [(adapter, adapter.read()) for adapter in self.adapters]
-        self.frame = frames[0][1]
-        previous = {t.id: t for t in self.targets}
-        self.targets = self._merge_and_track(frames, previous)
-        by_id = {t.id: t for t in self.targets}
-        self.at = by_id.get(self.at.id) if self.at is not None else None
-        if self.destination is not None and self.destination.kind == "element":
-            self.destination = by_id.get(self.destination.id)
-        if self.caps.pointer == "relative":
-            for target in self.targets:
+    @property
+    def manifest(self) -> Manifest:
+        return Manifest(self.body_id, self.version, self.integration.sensory_manifest(), self.interaction)
+
+    # ------------------------------------------------------------------ sensory channel
+    def observe(self) -> Observation:
+        obs = self.integration.observe()
+        obs.tick = self.tick
+        self.last_obs = obs
+        return obs
+
+    @property
+    def window_changed(self) -> bool:
+        if self.last_obs is None:
+            return True
+        return self.core.window_changed(self._find_image, self.last_obs.image)
+
+    # ------------------------------------------------------------------ find and the body slot
+    def find(self, scope: Optional[str] = None) -> Slot:
+        scope_target = self._lookup(scope) if scope else None
+        items = self.adapter.find(scope_target.handle if scope_target else None)
+        targets = [self._to_target(item) for item in items]
+        if self.interaction.pointer_mode == "relative":
+            for target in targets:
                 self._set_bearing(target)
-        return self.frame
+        self.slot = Slot(targets=targets, scope=scope, tick=self.tick)
+        self._find_image = self.last_obs.image.copy() if self.last_obs is not None else None
+        if self.at is not None and self.at.kind != "surface":
+            self.at = next((t for t in targets if t.id == self.at.id), None)
+        return self.slot
 
-    def summary(self) -> dict:
-        """Cheap numbers for the world model's vector input."""
-        confidences = [t.confidence for t in self.targets] or [0.0]
-        return {
-            "n_targets": len(self.targets),
-            "mean_confidence": float(np.mean(confidences)),
-            "anchor": self.frame.anchor if self.frame else (0.5, 0.5),
-            "has_at": self.at is not None,
-        }
+    def auto_find(self) -> bool:
+        """Core rule: refresh the slot when the window changed since the last find."""
+        if self.window_changed:
+            self.find()
+            return True
+        return False
 
-    def _merge_and_track(self, frames: list[tuple[Adapter, Frame]], previous: dict[str, Target]) -> list[Target]:
-        kept: list[Target] = []
-        for adapter, frame in frames:
-            stable = adapter.capabilities().stable_ids
-            for element in frame.elements:
-                candidate = self._to_target(adapter.name, element)
-                if any(iou(candidate.bbox, other.bbox) > 0.6 for other in kept):
-                    continue  # structured sources come first and win
-                candidate.id = self._assign_id(adapter.name, element, candidate, stable, previous)
-                kept.append(candidate)
-        return kept
+    def _key(self, handle: Any) -> Any:
+        try:
+            hash(handle)
+            return handle
+        except TypeError:
+            return repr(handle)
 
-    def _to_target(self, source: str, element: NativeElement) -> Target:
-        return Target(
-            id="",
-            label=element.label,
-            verbs=tuple(element.native_actions),
-            bbox=element.bbox,
-            reversible=element.reversible,
-            confidence=element.confidence,
-            value=element.value,
-            source=source,
-            handle=element.handle,
-        )
+    def _to_target(self, item: Item) -> Target:
+        key = self._key(item.handle)
+        if key not in self._ids:
+            self._ids[key] = f"t{self._next_id}"
+            self._next_id += 1
+        return Target(id=self._ids[key], label=label(item.role, item.name), kind=item.kind, verbs=tuple(item.verbs),
+                      bbox=item.bbox, handle=item.handle, dims=item.dims, collapsed=item.collapsed, value=item.value,
+                      reversible=item.reversible, confidence=item.confidence)
 
-    def _assign_id(self, source: str, element: NativeElement, candidate: Target, stable: bool,
-                   previous: dict[str, Target]) -> str:
-        key = (source, element.handle)
-        if stable and key in self._ids:
-            return self._ids[key]
-        if not stable:
-            best, best_iou = None, 0.5
-            for old in previous.values():
-                if old.source == source and old.label == candidate.label:
-                    overlap = iou(old.bbox, candidate.bbox)
-                    if overlap > best_iou:
-                        best, best_iou = old, overlap
-            if best is not None:
-                return best.id
-        new_id = f"t{self._next_id}"
-        self._next_id += 1
-        if stable:
-            self._ids[key] = new_id
-        return new_id
+    def _lookup(self, target_id: Optional[str]) -> Optional[Target]:
+        if target_id == "self":
+            return self.self_target()
+        return next((t for t in self.slot.targets if t.id == target_id), None)
 
     def _set_bearing(self, target: Target) -> None:
-        anchor = self.frame.anchor
-        cx, _ = target.center
-        target.bearing = round((cx - anchor[0]) * self.caps.fov_deg, 1)
+        anchor = (self.last_obs.pointer if self.last_obs and self.last_obs.pointer else (0.5, 0.5))
+        target.bearing = round((target.center[0] - anchor[0]) * self.interaction.fov_deg, 1)
         height = target.bbox[3] - target.bbox[1]
         target.distance = "near" if height > 0.3 else ("mid" if height > 0.1 else "far")
 
-    # ------------------------------------------------------------------ observing
     def self_target(self) -> Target:
-        x, y = self.frame.anchor if self.frame else (0.5, 0.5)
-        return Target(id="self", label="yourself", verbs=self.self_verbs, bbox=(x, y, x, y),
-                      source=self.primary.name, kind="self")
+        x, y = (self.last_obs.pointer if self.last_obs and self.last_obs.pointer else (0.5, 0.5))
+        return Target(id="self", label="self: body", kind="self", verbs=self.interaction.self_verbs, bbox=(x, y, x, y))
 
-    def observe(self, level: int, cells: tuple[int, ...] | list[int]) -> Observation:
-        """Targets inside the selected cells at that level, plus the options of both decision models."""
-        if self.frame is None:
-            raise RuntimeError("sense() or reset() must be called before observe()")
-        if level not in self.grid.levels:
-            raise ValueError(f"Level {level} is not active")
-        cells = tuple(sorted(set(int(c) for c in cells)))
-        anchor = self.frame.anchor
-        selected = set(cells)
-        returned: list[Target] = []
-
-        if level == 1:
-            for index in cells:
-                name = self.grid.direction(index)
-                if name == "here":
-                    returned += [t for t in self.targets if self.grid.cell_of(1, *t.center, anchor) == index]
-                    continue
-                returned.append(Target(id=f"dir:{name}", label=f"{name} of you", verbs=(), source="contract",
-                                       bbox=self.grid.cell_rect(1, index, anchor), kind="direction"))
+    # ------------------------------------------------------------------ the two questions
+    def questions(self) -> tuple[dict[str, list[Option]], list[Option]]:
+        """Navigation options per question, and action options (core actions only here)."""
+        targets = [Option(t.id, t.describe()) for t in self.slot.targets]
+        if self.interaction.pointer_mode == "relative":
+            navigation = {axis: [Option(HOLD, "hold")] + [Option(i, i) for i in inputs if i != HOLD]
+                          for axis, inputs in self.interaction.movement_axes.items()}
+            navigation["destination"] = [Option(KEEP, "keep the current destination")] + targets
         else:
-            occupied: set[int] = set()
-            for target in self.targets:
-                index = self.grid.cell_of(level, *target.center, anchor)
-                if index in selected:
-                    returned.append(target)
-                    occupied.add(index)
-            for index in cells:
-                if index not in occupied:
-                    returned.append(Target(id=f"cell:{level}:{index}", label=f"empty area, {self.grid.cell_name(level, index)}",
-                                           verbs=(), source="contract", bbox=self.grid.cell_rect(level, index, anchor),
-                                           kind="positional"))
-
-        edges: list[Target] = []
-        if self.caps.pointer == "absolute":
-            edges = [
-                Target(id="edge:top", label="top edge (scroll up)", verbs=(), bbox=(0.0, 0.0, 1.0, 0.02), source="contract", kind="edge"),
-                Target(id="edge:bottom", label="bottom edge (scroll down)", verbs=(), bbox=(0.0, 0.98, 1.0, 1.0), source="contract", kind="edge"),
-            ]
-
-        navigation = self._navigation_options(returned + edges)
-        action = self._action_options()
-        self.observation = Observation(
-            image=self.frame.image, level=level, cells=cells, targets=returned, at=self.at,
-            navigation=navigation, action=action, destination=self.destination, step=self.step,
-        )
-        return self.observation
-
-    def _navigation_options(self, targets: list[Target]) -> dict[str, list[Option]]:
-        target_options = [Option(t.id, t.describe()) for t in targets]
-        if self.caps.pointer == "absolute":
-            return {"navigate": [Option(HOLD, "stay where you are")] + target_options}
-        questions = {
-            axis: [Option(HOLD, "hold")] + [Option(name, name) for name in inputs if name != HOLD]
-            for axis, inputs in self.caps.movement_axes.items()
-        }
-        questions["destination"] = [Option(KEEP, "keep the current destination")] + target_options
-        return questions
-
-    def _action_options(self) -> list[Option]:
-        options = [Option(NONE, "do nothing")]
+            navigation = {"navigate": [Option(HOLD, "stay where you are")] + targets}
+        action = [Option(NONE, "do nothing")]
         if self.at is not None:
-            options += [Option(f"{verb}@{self.at.id}", f"{verb} {self.at.label}") for verb in self.at.verbs]
-        options += [Option(f"{verb}@self", verb) for verb in self.self_verbs]
-        return options
+            action += [Option(f"{verb}@{self.at.id}", f"{verb} {self.at.label}") for verb in self.at.verbs]
+        action += [Option(f"{verb}@self", verb) for verb in self.interaction.self_verbs]
+        action += [Option(name, _CORE_TEXT[name]) for name in CORE_ACTIONS]
+        return navigation, action
+
+    def narrowing(self, target: Target) -> Narrowing:
+        size = None
+        if self.last_obs is not None:
+            h, w = self.last_obs.image.shape[:2]
+            size = (w, h)
+        return Narrowing(target.bbox, target.dims or 2, size, self.narrow_min_px, self.narrow_max_depth)
 
     # ------------------------------------------------------------------ acting
     def begin_step(self) -> None:
-        """Start the protected core's timer. The brain calls this before deciding."""
         self.core.start()
+        self.tick += 1
 
-    def act(self, navigation: dict[str, str], action: str = NONE, arg: Optional[str] = None) -> Outcome:
-        """Execute both decision models' choices in the same step (action first, then navigation)."""
-        if self.observation is None:
-            raise RuntimeError("observe() must be called before act()")
-        anchor_before = self.frame.anchor
+    def act(self, navigation: dict[str, str], action: str = NONE, arg: Optional[str] = None,
+            point: Optional[Point] = None, drag_to: Optional[Point] = None) -> Outcome:
+        """Action on the current target first, then navigation. `point` is the narrowing result for a surface pick."""
         results: list[dict] = []
-        native: dict[str, Any] = {}
-
-        action_outcome = self._do_action(action, arg, results, native)
-        nav_outcome = self._do_navigation(navigation, results, native)
-
-        image_before = self.frame.image
-        self.sense()
-        changed = _changed(image_before, self.frame.image) or any(r.get("reward") for r in results)
+        native: dict = {}
+        action_outcome = self._do_action(action, arg, drag_to, results, native)
+        nav_outcome = self._do_navigation(navigation, point, results, native)
+        before = self.last_obs.image if self.last_obs is not None else None
+        obs = self.observe()
+        changed = self.core.window_changed(before, obs.image) or any(r.get("reward") for r in results)
         if action_outcome.status == "done":
             action_outcome.changed = changed
-        if self.caps.pointer == "relative" and nav_outcome.status == "moving" and self.destination is not None:
+        if self.interaction.pointer_mode == "relative" and nav_outcome.status == "moving":
             nav_outcome = self._relative_status(nav_outcome)
+        return self._finish(nav_outcome, action_outcome, results, native)
 
+    def _finish(self, nav: NavOutcome, act: ActionOutcome, results: list[dict], native: dict) -> Outcome:
         for r in results:
             self.env_done = self.env_done or bool(r.get("done"))
             if r.get("success") is not None:
                 self.env_success = bool(r["success"])
         self.step += 1
-        self.last_exec = {"anchor_before": anchor_before, "anchor_after": self.frame.anchor, "native": native}
-        return Outcome(
-            navigation=nav_outcome,
-            action=action_outcome,
-            step=self.step,
-            latency_ms=self.core.stop(),
-            env_reward=float(sum(r.get("reward", 0.0) for r in results)),
-            env_done=self.env_done,
-            env_success=self.env_success,
-        )
+        self.last_exec = {"native": native, "pointer": self.last_obs.pointer if self.last_obs else None}
+        return Outcome(navigation=nav, action=act, step=self.step, latency_ms=self.core.stop(),
+                       env_reward=float(sum(r.get("reward", 0.0) for r in results)), env_done=self.env_done,
+                       env_success=self.env_success)
 
-    def _find(self, target_id: str) -> Optional[Target]:
-        if target_id == "self":
-            return self.self_target()
-        for target in self.targets:
-            if target.id == target_id:
-                return target
-        if self.observation is not None:
-            for target in self.observation.targets:
-                if target.id == target_id:
-                    return target
-        return None
+    def _revalidate(self, target_id: str) -> Optional[Target]:
+        target = self._lookup(target_id)
+        if target is None or target.kind == "self":
+            return target
+        if self.window_changed:
+            self.find(self.slot.scope)
+            fresh = self._lookup(target_id)
+            if fresh is None:
+                return None
+            if target.point is not None:
+                fresh = replace(fresh, point=target.point)
+            target = fresh
+        return target
 
-    def _do_action(self, action: str, arg: Optional[str], results: list[dict], native: dict) -> ActionOutcome:
+    def _do_action(self, action: str, arg: Optional[str], drag_to: Optional[Point], results: list[dict],
+                   native: dict) -> ActionOutcome:
         if not action or action == NONE:
             return ActionOutcome("none", False, "no action")
+        if action in CORE_ACTIONS:
+            return ActionOutcome("none", False, f"{action} is handled by the brain")
         verb, _, target_id = action.partition("@")
-        target = self._find(target_id)  # revalidation: the target must still exist
+        target = self._revalidate(target_id)
+        if target is not None and self.at is not None and self.at.id == target_id and self.at.point is not None:
+            target = replace(target, point=self.at.point)
         if target is None:
-            return ActionOutcome("failed", False, f"target {target_id} no longer exists")
-        if target.kind == "element" and verb not in target.verbs:
-            return ActionOutcome("failed", False, f"{target.label!r} does not support {verb}")
+            return ActionOutcome("unavailable", False, f"{target_id} is no longer available")
+        if target.kind != "self" and verb not in target.verbs:
+            return ActionOutcome("failed", False, f"{target.label} does not support {verb}")
         allowed, reason = self.core.allow(verb, target)
         if not allowed:
             return ActionOutcome("failed", False, reason)
-        adapter = self._by_name.get(target.source, self.primary)
-        res = adapter.invoke(target.handle, verb, arg)
+        if target.kind == "surface":
+            start = target.point or target.center
+            points = [start, drag_to] if verb == "drag" and drag_to is not None else [start]
+            res = self.adapter.act_at(target.handle, points, verb)
+        else:
+            res = self.adapter.invoke(None if target.kind == "self" else target.handle, verb, arg)
         results.append(res)
-        native["action"] = {"adapter": adapter.name, "verb": verb, "target": target.id, "arg": arg}
+        native["action"] = {"verb": verb, "target": target.id, "arg": arg}
         if not res.get("ok"):
             return ActionOutcome("failed", False, res.get("text") or f"{verb} failed")
         return ActionOutcome("done", True, res.get("text") or f"{verb} {target.label}")
 
-    def _do_navigation(self, navigation: dict[str, str], results: list[dict], native: dict) -> NavOutcome:
+    def _do_navigation(self, navigation: dict[str, str], point: Optional[Point], results: list[dict],
+                       native: dict) -> NavOutcome:
         navigation = navigation or {}
-        if self.caps.pointer == "absolute":
-            choice = navigation.get("navigate", HOLD)
-            if choice == HOLD:
-                return NavOutcome("held", "stayed in place")
-            target = self._find(choice)
-            if target is None:
-                return NavOutcome("blocked", f"target {choice} no longer exists")
-            if target.kind == "edge":
-                verb = "scroll_up" if target.id == "edge:top" else "scroll_down"
-                res = self.primary.invoke(None, verb, None)
-                results.append(res)
-                native["navigation"] = {"scroll": verb}
-                return NavOutcome("reached" if res.get("ok") else "blocked", res.get("text") or verb.replace("_", " "))
-            x, y = target.center
-            res = self.primary.point(x, y)
-            results.append(res)
-            native["navigation"] = {"point": [x, y]}
-            if not res.get("ok"):
-                return NavOutcome("blocked", res.get("text") or "pointer could not move")
-            self.at = target if target.kind == "element" else None
-            return NavOutcome("reached", f"pointer at {target.label}")
+        if self.interaction.pointer_mode == "relative":
+            return self._move_relative(navigation, results, native)
+        choice = navigation.get("navigate", HOLD)
+        if choice == HOLD:
+            return NavOutcome("held", "stayed in place")
+        target = self._revalidate(choice)
+        if target is None:
+            return NavOutcome("blocked", f"{choice} is no longer available")
+        if target.kind == "group":
+            self.find(scope=target.id)
+            native["navigation"] = {"expand": target.id}
+            return NavOutcome("reached", f"opened {target.label}")
+        if target.kind == "surface":
+            target = replace(target, point=point or target.center)
+            if "hover" in self.interaction.verbs:
+                results.append(self.adapter.act_at(target.handle, [target.point], "hover"))
+            self.at = target
+            native["navigation"] = {"surface": target.id, "point": list(target.point)}
+            return NavOutcome("reached", f"at {target.label}, point {target.point[0]:.2f}, {target.point[1]:.2f}")
+        if "hover" in target.verbs:
+            results.append(self.adapter.invoke(target.handle, "hover"))
+        self.at = target
+        native["navigation"] = {"target": target.id}
+        return NavOutcome("reached", f"at {target.label}")
 
-        # relative mode: movement inputs per axis plus an optional destination change
+    def _move_relative(self, navigation: dict[str, str], results: list[dict], native: dict) -> NavOutcome:
         choice = navigation.get("destination", KEEP)
         if choice != KEEP:
-            self.destination = self._find(choice)
+            self.destination = self._lookup(choice)
         inputs = {axis: value for axis, value in navigation.items() if axis != "destination" and value != HOLD}
         if not inputs:
             return NavOutcome("held", "held position")
-        res = self.primary.move(inputs)
+        res = self.adapter.move(inputs)
         results.append(res)
         native["navigation"] = {"move": inputs}
         if res.get("blocked") or not res.get("ok"):
@@ -331,30 +284,49 @@ class Body:
         return NavOutcome("moving", res.get("text") or ", ".join(f"{k} {v}" for k, v in inputs.items()))
 
     def _relative_status(self, outcome: NavOutcome) -> NavOutcome:
-        target = self._find(self.destination.id) if self.destination else None
+        if self.destination is None:
+            return outcome
+        self.find(self.slot.scope)
+        target = self._lookup(self.destination.id)
         if target is None:
             return outcome
-        self._set_bearing(target)
         if target.distance == "near" and abs(target.bearing or 0) < 10:
             self.at = target
             return NavOutcome("reached", f"reached {target.label}")
-        return NavOutcome("moving", f"{target.label} now {target.describe()}")
+        return NavOutcome("moving", f"{target.describe()}")
 
-    # ------------------------------------------------------------------ training and checks
-    def describe_source(self) -> str:
-        """Raw source for the labeler (training only)."""
-        for adapter in self.adapters:
-            if adapter.capabilities().has_source:
-                text = adapter.source()
-                if text:
-                    return text
-        return "\n".join(f"{t.id}: {t.label} ({', '.join(t.verbs)})" for t in self.targets)
+    # ------------------------------------------------------------------ wait
+    def wait(self, watch: Optional[list] = None, cap_s: Optional[float] = None) -> Outcome:
+        """No inference: poll the sensory channel until a meaningful change or the cap."""
+        cap = self.wait_cap_s if cap_s is None else float(cap_s)
+        start_image = self.last_obs.image if self.last_obs is not None else None
+        started = time.monotonic()
+        seen = False
+        while time.monotonic() - started < cap:
+            time.sleep(self.wait_poll_s)
+            obs = self.observe()
+            if self.core.window_changed(start_image, obs.image, watch):
+                seen = True
+                break
+        status = "done" if seen else "none"
+        text = "change seen" if seen else f"no change within {cap:.1f} s"
+        return self._finish(NavOutcome("held", "waited"), ActionOutcome(status, seen, text), [], {"wait": cap})
 
+    def find_outcome(self, scope: Optional[str] = None) -> Outcome:
+        """A model-called find as a step outcome."""
+        slot = self.find(scope)
+        text = f"found {len(slot.targets)} items" + (f" in {scope}" if scope else "")
+        return self._finish(NavOutcome("held", "stayed in place"), ActionOutcome("done", False, text), [], {"find": scope})
+
+    # ------------------------------------------------------------------ checks
     def check(self, condition: dict | None) -> bool:
-        return self.core.check(condition, CheckState(targets=self.targets, env_success=self.env_success))
+        if self.window_changed:
+            self.find(self.slot.scope)
+        return self.core.check(condition, CheckState(targets=self.slot.targets, env_success=self.env_success))
 
 
-def _changed(before: np.ndarray, after: np.ndarray) -> bool:
-    if before is None or after is None or before.shape != after.shape:
-        return True
-    return float(np.mean(np.abs(before.astype(np.int16) - after.astype(np.int16)))) > 0.5
+_CORE_TEXT = {
+    "think": "think: reason in words before acting",
+    "find": "find: look again at what is available here",
+    "wait": "wait: do nothing until something changes",
+}

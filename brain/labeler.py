@@ -1,4 +1,6 @@
-"""Labeler: the frozen VLM with privileged access to the environment's source. Training only.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Labeler: the frozen VLM with privileged access to the environment's source. Training only.
 
 For each screen and subtask it returns the targets that really exist, the important ones (on any valid
 path from this screen to the goal) and the level each important target needs (1 if moving in its

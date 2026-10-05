@@ -1,4 +1,6 @@
-"""Held-out evaluation of the supervised heads, and the threshold/budget sweep used to tune HeadsPolicy."""
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Held-out evaluation of the supervised heads, and the threshold/budget sweep used to tune HeadsPolicy."""
 
 from __future__ import annotations
 

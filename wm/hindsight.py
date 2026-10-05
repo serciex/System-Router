@@ -1,4 +1,6 @@
-"""Hindsight labels from collected episodes, checked against the environment's own success signal.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Hindsight labels from collected episodes, checked against the environment's own success signal.
 
 - Important targets: in episodes the environment marked successful, the targets the agent actually
   reached or acted on. Every step labels the cells (at every active level) containing those targets.

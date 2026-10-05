@@ -1,4 +1,6 @@
-"""Run-time policy from the supervised heads: a threshold for routing and a budget for cells.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Run-time policy from the supervised heads: a threshold for routing and a budget for cells.
 
     route: System 2 if P(System 1 wrong) > escalate_threshold, else System 1
     cells: every cell (of the chosen level) with probability >= cell_threshold, kept between min_cells

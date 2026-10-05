@@ -1,4 +1,6 @@
-"""The world model's flat multi-discrete action and its masks.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+The world model's flat multi-discrete action and its masks.
 
     [ route: S1 | S2 ]  [ level: one per active level ]  [ cells of every active level: 0/1 each ]
 

@@ -1,4 +1,6 @@
-"""Put the r2dreamer submodule on the import path (it is a flat folder of modules, not a package).
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Put the r2dreamer submodule on the import path (it is a flat folder of modules, not a package).
 
 Its modules (`dreamer`, `networks`, `tools`, `buffer`, `trainer`, `envs`, ...) are imported by name, which is
 why this repository's own packages avoid those names.

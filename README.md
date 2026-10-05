@@ -2,51 +2,42 @@
 
 System Router for System 1 and System 2 thinking. It uses a crawler with predefined contracts for interacting with environments.
 
-One universal brain operates any environment through interchangeable bodies that all follow the same contract:
+One brain operates any environment through interchangeable bodies that all follow the same contract:
 
-- **A frozen VLM** (Qwen3.5) used two ways. **System 1** picks from verified options in a single forward pass (the [system-one](https://github.com/sgoedecke/system-one) method). **System 2** reasons with the screenshot, plans the task list and takes over when System 1 is unsure.
-- **A trained world model** ([R2-Dreamer](https://github.com/NM512/r2dreamer)) that learns the dynamics and decides only three things per step: **which route** (System 1 or 2), **what level of detail**, and **which grid cells** to look at.
-- **A body contract built once.** Each environment only needs a thin adapter. Navigation and action are two decision models that run in parallel, each with its own sub-contract.
+- **One LLM** (Qwen3.5, native vision) with three modes: **act** (two parallel constrained picks in one pass each, the [system-one](https://github.com/sgoedecke/system-one) method), **silent steps** (latent self-direction, stage 6), and **think** (token reasoning for plans, word goals and code).
+- **Core actions in every body:** **think**, **find** (refresh the options; run automatically when the window changes) and **wait** (no inference until something changes).
+- **A body contract built once.** A protected sensory channel (what the model sees) and an adapter-owned interaction channel (what can be done). Positions on surfaces come from a shared narrowing library. The model later writes its own adapters.
 
-Design: [docs/Universal Brain, Interchangeable Bodies Technical Design Spec v2.md](docs/Universal%20Brain,%20Interchangeable%20Bodies%20Technical%20Design%20Spec%20v2.md). Contract: [body/CONTRACT.md](body/CONTRACT.md).
+Design: [spec v3](docs/Universal%20Brain,%20Interchangeable%20Bodies%20Technical%20Design%20Spec%20v3.md). Contract: [body/CONTRACT.md](body/CONTRACT.md) (v0.3). Handoff: [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## Layout
 
 ```
-body/           the contract, built once
-  schema.py       Target, Option, Observation, Outcome, Capabilities
-  grid.py         levels and cells (level 1 = 3x3 directions around the anchor)
-  contract.py     Body: sense, observe(level, cells), act(navigation, action, arg)
-  core.py         protected core: completion checks, latency, executor limits
-  log.py          JSON-lines step log (System 2 replans from it)
-  conformance.py  checks every adapter must pass
-  adapters/       MiniWoB DOM, accessibility tree, vision (OmniParser), degraded variants
-brain/          the frozen-LLM roles
-  llm.py          load Qwen3.5 (processor + image-text model), generation, JSON parsing
-  system1.py      constrained one-pass choices with the goal context cached across steps
-  system2.py      planning and fallback decisions with the image
-  goal_context.py goal, task list, current subtask
-  labeler.py      privileged labels: important targets and the level they need (training only)
-  features.py     VLM vision-patch cells and text hidden state for the world model
-  step.py         Brain: one step of the whole system
-wm/             the trained part
-  codec.py        flat action [route | level | cells] and masks
-  dataset.py      collected episodes and the sequence sampler
-  hindsight.py    labels from verified success: important cells, System 1 wrong
-  supervised.py   world model + cells head + escalation head (offline)
-  baseline.py     the same heads without the world model
-  evaluate.py     held-out sweep that suggests thresholds and cell budget
-  heads_policy.py run-time routing and segmentation from the heads
-  rewards.py      r_seg and r_dec (RL fine-tuning)
-  rules.py        stage-1 rules in place of the world model
-  gym_env.py      the whole system as an r2dreamer environment
-  agent.py        r2dreamer with two reward heads and two critics (RL fine-tuning)
-environments/   MiniWoB++ (WebArena and OSWorld come in stages 4-5)
-scripts/        check_adapters, run_stage1, collect, train_offline, train_wm
-configs/        default.yaml (paths, model, grid, rewards, environments)
-notebooks/      colab.ipynb
-system one/     submodule: sgoedecke/system-one (reference for the System 1 method)
-dreamer v3/     submodule: NM512/r2dreamer (world model)
+body/             the contract, built once
+  vocab.py          canonical roles, verbs, core actions, sensor types
+  schema.py         Observation, manifests, Item, Target, Slot, Option, Outcome
+  narrowing.py      regions inside surfaces (9 for 2D, 3 for 1D, plus here)
+  prompt.py         fixed prompt layout built by the core
+  contract.py       Body: observe, find and the body slot, questions, act, wait
+  core.py           protected core: change check, think rule, goal age, limits, completion checks
+  conformance.py    v0.3 checks plus the hidden split
+  factory.py        integration + adapter -> Body
+  adapters/         web (MiniWoB DOM), fallback (whole window), code workspace;
+                    a11y, vision, degraded are pending port to v0.3
+brain/            the LLM side
+  llm.py            load Qwen3.5, generation, JSON parsing
+  system1.py        act: one prefill with the screen, one constrained pass per question
+  think.py          think: plans, word goals, picks, points, code
+  grounding.py      native coordinate pointing (compared against narrowing)
+  goal_context.py   goal, task list, current subtask, word goal
+  step.py           the v3 step loop
+environments/     integrations: MiniWoB++, real desktop (mss + pyautogui), code workspace
+scripts/          check_adapters (stage 1 gate), run_loop (stage 2)
+configs/          default.yaml
+tests/            contract, narrowing, conformance, prompt, rewards (fakes, no model)
+wm/, some brain/ and scripts/ files   v2 world-model design, marked OBSOLETE, kept for reference
+system one/       submodule: sgoedecke/system-one
+dreamer v3/       submodule: NM512/r2dreamer (unused under v3)
 ```
 
 ## Setup
@@ -58,36 +49,18 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
 
-MiniWoB++ also needs Chrome or Chromium. The model is not in the repository. Either point `paths.model` at a Hugging Face id (`--set paths.model=Qwen/Qwen3.5-9B`) or download it into `models/Qwen3.5-9B`.
+MiniWoB++ needs Chrome or Chromium. The desktop body needs a display (Xvfb on Colab or servers). The model is not in the repository: point `paths.model` at a Hugging Face id or a local folder. On an 8 GB GPU use `--set paths.model=Qwen/Qwen3.5-4B --set llm.quantization=4bit`.
 
-On an 8 GB GPU use `--set paths.model=Qwen/Qwen3.5-4B --set llm.quantization=4bit`. For the full model, use Colab with an A100 ([notebooks/colab.ipynb](notebooks/colab.ipynb)).
-
-## Running the stages
-
-The world model is trained **supervised first, on data collected once**, then fine-tuned with RL:
+## Running
 
 ```bash
-python -m pytest -q tests                                            # no model, no browser
-python scripts/check_adapters.py --adapters dom a11y "degraded:dom"  # 0: contract conformance
-python scripts/run_stage1.py --episodes 20 --route s1                # 1: rules, System 1 + escalation
-python scripts/run_stage1.py --episodes 20 --route s2                #    baseline: System 2 alone
-python scripts/collect.py --episodes 500                             # 2: both systems answer every step
-python scripts/collect.py --episodes 100 --heldout                   #    held-out adapters, for evaluation
-python scripts/train_offline.py                                      # 3: world model + supervised heads (no LLM)
-python scripts/train_offline.py --baseline                           #    plain classifier to compare against
-python scripts/run_stage1.py --episodes 20 --policy heads            # 4: online with the trained heads
-python scripts/train_wm.py --init-from runs/offline/latest.pt        # 5: RL fine-tuning (later)
+python -m pytest -q tests                                                   # no model, no browser
+python scripts/check_adapters.py --adapters web fallback                    # stage 1 gate
+python scripts/run_loop.py --episodes 20                                    # stage 2: untrained loop
+python scripts/run_loop.py --episodes 20 --think-always                     # baseline: think every step
+python scripts/run_loop.py --episodes 20 --adapter fallback --grounding native
 ```
-
-Labels for stage 3 come from hindsight. Important cells are where the agent actually acted in episodes MiniWoB marked successful. "System 1 wrong" means System 1 disagreed with System 2 on the same step. `train_offline.py` writes `tuning.json` with suggested thresholds, which stage 4 reads.
-
-Any config value can be overridden with `--set key=value`, for example `--set env.adapter_pool='[[dom],[a11y],["degraded:dom"]]'` to train across adapters.
 
 ## Status
 
-All code is written but has **not been run yet**. The model weights are added once the full system is built. Things to verify first:
-
-1. Qwen3.5 with System 1's cache reuse (its hybrid linear attention must deep-copy and extend correctly; otherwise `System1(reuse_cache=False)`).
-2. The vision-feature call (`get_image_features`) against the installed `transformers` version.
-3. The accessibility and OmniParser adapters against the installed MiniWoB, Selenium and OmniParser versions.
-4. System 1 latency on the target GPU, before setting `rewards.expected_latency_ms`.
+Stages 0 to 2 are written but **nothing has been run**. Stages 3 to 8 (data with counterfactual branches, LoRA training, adapter writing, silent mode, more bodies) are not implemented. To verify first: Qwen3.5 cache copy and extension after an image prefill (else `System1(reuse_cache=False)`), the multimodal chat template with the sentinel split, MiniWoB action names, and latency per step.

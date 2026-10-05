@@ -1,18 +1,24 @@
-"""DOM adapter for MiniWoB++: reads the environment's own `dom_elements` and invokes by element ref.
-
-Absolute pointer mode. Structured source, confidence 1.0, stable handles (element refs).
-"""
+"""Web starter adapter on MiniWoB++'s DOM: find by container, invoke by element ref, act_at on canvases."""
 
 from __future__ import annotations
 
-from typing import Optional
+from collections import defaultdict
+from typing import Any, Optional
 
-from ..schema import Capabilities, Frame, NativeElement
+from ..schema import InteractionManifest, Item, Point
+from ..vocab import meaningful
 from .base import Adapter, result
 
-TYPEABLE = {"input_text", "input_password", "textarea", "input_number", "input_email", "input_search", "input_tel"}
-CLICKABLE = {"button", "a", "input_checkbox", "input_radio", "input_submit", "input_button", "option", "select", "label", "span", "t", "div", "li", "td", "p", "h1", "h2", "h3"}
-SKIP_IDS = {"wrap", "query", "area", "reward-display", "sync-task-cover"}
+ROLES = {
+    "button": "button", "input_submit": "button", "input_button": "button", "a": "link",
+    "input_text": "textbox", "input_password": "textbox", "textarea": "textbox", "input_number": "textbox",
+    "input_email": "textbox", "input_search": "textbox", "input_tel": "textbox", "input_date": "textbox",
+    "input_checkbox": "checkbox", "input_radio": "radio", "option": "option", "select": "option",
+    "img": "image", "canvas": "surface",
+}
+TEXT_TAGS = {"t", "span", "div", "p", "li", "td", "th", "label", "h1", "h2", "h3", "h4", "b", "i", "strong", "em"}
+SKIP_IDS = {"wrap", "query", "reward-display", "sync-task-cover"}
+TYPEABLE = {"textbox"}
 
 
 def _scalar(value) -> float:
@@ -23,79 +29,103 @@ def _scalar(value) -> float:
 
 
 class MiniWoBDomAdapter(Adapter):
-    name = "dom"
+    name = "web"
 
-    def __init__(self, environment):
+    def __init__(self, environment, collapse_over: int = 12):
         self.env = environment
+        self.collapse_over = int(collapse_over)
 
-    def capabilities(self) -> Capabilities:
-        return Capabilities(pointer="absolute", verbs=("click", "type", "scroll_up", "scroll_down"),
-                            stable_ids=True, realtime=False, has_source=True)
+    def manifest(self) -> InteractionManifest:
+        return InteractionManifest(pointer_mode="absolute",
+                                   verbs=("click", "type", "hover", "select", "drag", "scroll_up", "scroll_down"),
+                                   self_verbs=("scroll_up", "scroll_down"),
+                                   actuators={"pointer": {}, "keyboard": {}})
 
-    def reset(self, seed: Optional[int] = None) -> Frame:
-        self.env.reset(seed=seed)
-        return self.read()
-
-    def read(self) -> Frame:
+    # ------------------------------------------------------------------ find
+    def find(self, scope: Any = None) -> list[Item]:
         width, height = self.env.size
-        elements = []
-        for element in self.env.dom_elements:
-            native = self._element(element, width, height)
-            if native is not None:
-                elements.append(native)
-        return Frame(image=self.env.image, anchor=self.env.pointer, elements=elements, text=self.env.utterance,
-                     info={"task": self.env.task})
+        elements = [e for e in self.env.dom_elements if e.get("id") not in SKIP_IDS]
+        by_ref = {int(e["ref"]): e for e in elements}
+        items: list[Item] = []
+        for element in elements:
+            item = self._item(element, by_ref, width, height)
+            if item is not None:
+                items.append(item)
+        if scope is not None:
+            return [i for i in items if i.container == scope]
+        return self._collapse(items, by_ref, width, height)
 
-    def _element(self, element: dict, width: int, height: int) -> Optional[NativeElement]:
-        tag = str(element.get("tag", ""))
-        if element.get("id") in SKIP_IDS or tag in {"body", "html", "form"}:
-            return None
-        flags = element.get("flags")
-        is_leaf = bool(flags[3]) if flags is not None and len(flags) > 3 else True
-        text = str(element.get("text") or "").strip()
-        value = str(element.get("value") or "").strip()
-        if tag in TYPEABLE:
-            verbs = ("click", "type")
-        elif tag in CLICKABLE and (is_leaf or tag in {"button", "a", "input_checkbox", "input_radio"}):
-            if not text and tag not in {"button", "input_checkbox", "input_radio", "input_submit"}:
-                return None
-            verbs = ("click",)
-        else:
-            return None
+    def _box(self, element: dict, width: int, height: int):
         left, top = _scalar(element["left"]), _scalar(element["top"])
         w, h = _scalar(element["width"]), _scalar(element["height"])
         if w <= 0 or h <= 0:
             return None
         box = (max(left / width, 0.0), max(top / height, 0.0), min((left + w) / width, 1.0), min((top + h) / height, 1.0))
-        if box[0] >= box[2] or box[1] >= box[3]:
+        return box if box[0] < box[2] and box[1] < box[3] else None
+
+    def _item(self, element: dict, by_ref: dict, width: int, height: int) -> Optional[Item]:
+        tag = str(element.get("tag", ""))
+        flags = element.get("flags")
+        is_leaf = bool(flags[3]) if flags is not None and len(flags) > 3 else True
+        text = str(element.get("text") or "").strip()
+        value = str(element.get("value") or "").strip()
+        role = ROLES.get(tag) or ("text" if tag in TEXT_TAGS and is_leaf and text else None)
+        if role is None:
             return None
-        label = text or value or (element.get("id") or tag)
-        label = f"{label} ({tag.replace('input_', '')})" if tag not in {"t", "span", "div"} else label
-        return NativeElement(handle=int(element["ref"]), bbox=box, label=label, role=tag,
-                             native_actions=verbs, value=value, confidence=1.0)
+        box = self._box(element, width, height)
+        if box is None:
+            return None
+        name = text or value or str(element.get("id") or "")
+        if not meaningful(name):
+            name = f"unnamed {role}"
+        if role == "surface":
+            return Item(handle=int(element["ref"]), kind="surface", role="surface", name=name or "canvas",
+                        verbs=("click", "drag", "hover"), bbox=box, dims=2, container=element.get("parent"))
+        verbs = ("click", "type", "hover") if role in TYPEABLE else ("click", "hover")
+        if role == "option":
+            verbs = ("select", "click", "hover")
+        return Item(handle=int(element["ref"]), kind="element", role=role, name=name, verbs=verbs, bbox=box,
+                    container=element.get("parent"), value=value)
 
-    def invoke(self, handle, native_action: str, arg: Optional[str] = None) -> dict:
-        if native_action == "click" and handle is not None:
-            return self._wrap(self.env.click_ref(handle), "clicked")
-        if native_action == "type" and handle is not None:
-            return self._wrap(self.env.type_into_ref(handle, arg or ""), f'typed "{arg or ""}"')
-        if native_action in ("scroll_up", "scroll_down"):
-            return self._wrap(self.env.scroll(native_action.split("_")[1]), native_action.replace("_", " "))
-        return result(False, f"unsupported verb {native_action}")
+    def _collapse(self, items: list[Item], by_ref: dict, width: int, height: int) -> list[Item]:
+        groups: dict[Any, list[Item]] = defaultdict(list)
+        for item in items:
+            groups[item.container].append(item)
+        out: list[Item] = []
+        for container, members in groups.items():
+            parent = by_ref.get(int(container)) if container not in (None, 0) else None
+            if len(members) <= self.collapse_over or parent is None:
+                out.extend(members)
+                continue
+            box = self._box(parent, width, height) or members[0].bbox
+            name = str(parent.get("id") or parent.get("classes") or "list").strip() or "list"
+            out.append(Item(handle=int(container), kind="group", role="group", name=name, verbs=(), bbox=box,
+                            collapsed=len(members)))
+        return out
 
-    def point(self, x: float, y: float) -> dict:
-        return self._wrap(self.env.point(x, y), "pointer moved")
+    # ------------------------------------------------------------------ execute
+    def invoke(self, handle, verb: str, arg: Optional[str] = None) -> dict:
+        if verb in ("scroll_up", "scroll_down"):
+            return {**self.env.scroll(verb.split("_")[1]), "text": verb.replace("_", " ")}
+        if handle is None:
+            return result(False, f"{verb} needs a target")
+        if verb in ("click", "select"):
+            return {**self.env.click_ref(handle), "text": "clicked"}
+        if verb == "type":
+            return {**self.env.type_into_ref(handle, arg or ""), "text": f'typed "{arg or ""}"'}
+        if verb == "hover":
+            element = next((e for e in self.env.dom_elements if int(e["ref"]) == int(handle)), None)
+            if element is None:
+                return result(False, "element gone")
+            box = self._box(element, *self.env.size)
+            return {**self.env.point((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), "text": "pointer moved"}
+        return result(False, f"unsupported verb {verb}")
 
-    def source(self) -> Optional[str]:
-        page = self.env.page_source()
-        if page:
-            return page
-        lines = [f"{e.get('ref')}: <{e.get('tag')} id={e.get('id')!r} class={e.get('classes')!r}> {e.get('text') or ''}"
-                 for e in self.env.dom_elements]
-        return "\n".join(lines)
-
-    @staticmethod
-    def _wrap(res: dict, text: str) -> dict:
-        res = dict(res)
-        res["text"] = res.get("text") or (text if res.get("ok") else "failed")
-        return res
+    def act_at(self, handle, points: list[Point], verb: str) -> dict:
+        if verb == "click":
+            return {**self.env.click_at(*points[0]), "text": "clicked"}
+        if verb == "hover":
+            return {**self.env.point(*points[0]), "text": "pointer moved"}
+        if verb == "drag" and len(points) >= 2:
+            return {**self.env.drag(points[0], points[1]), "text": "dragged"}
+        return result(False, f"unsupported verb {verb} on a surface")

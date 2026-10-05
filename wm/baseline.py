@@ -1,4 +1,6 @@
-"""Baseline for the stage 3 gate: the same two heads on the current step's inputs only (no world model).
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Baseline for the stage 3 gate: the same two heads on the current step's inputs only (no world model).
 
 If the world model's heads do not beat this, the dynamics are not adding anything on these tasks.
 It exposes the same `supervised_update` and `predict_sequence` interface as SupervisedDreamer, so

@@ -1,7 +1,7 @@
-"""MiniWoB++ (Farama `miniwob` package): hundreds of small web tasks in headless Chrome via Selenium.
+"""MiniWoB++ (Farama `miniwob` package): small web tasks in headless Chrome via Selenium.
 
-This wraps one gymnasium environment and exposes the few native operations adapters need. It does not
-know about targets or the contract. Coordinates passed in are normalized and converted to pixels here.
+Integration for the sensory channel (screen, pointer, goal, episode lifecycle) plus the native
+operations adapters use. Coordinates passed in are normalized and converted to pixels here.
 
 Install: `pip install miniwob` plus Chrome/Chromium and a matching chromedriver.
 """
@@ -13,8 +13,12 @@ from typing import Any, Optional
 
 import numpy as np
 
+from body.schema import Observation, Screen, ScreenSpec, SensoryManifest
 
-class MiniWoBEnvironment:
+from .base import Integration
+
+
+class MiniWoBEnvironment(Integration):
     def __init__(self, tasks: list[str], render: bool = False, seed: int = 0):
         import gymnasium
         import miniwob
@@ -53,6 +57,18 @@ class MiniWoBEnvironment:
         if self.env is not None:
             self.env.close()
             self.env = None
+
+    # ------------------------------------------------------------------ sensory channel
+    def observe(self) -> Observation:
+        return Observation(screens=[Screen("flat", self.image)], pointer=self.pointer)
+
+    def sensory_manifest(self) -> SensoryManifest:
+        width, height = self.size
+        return SensoryManifest(screens=[ScreenSpec("flat", width, height)], realtime=False)
+
+    @property
+    def goal(self) -> str:
+        return self.utterance
 
     # ------------------------------------------------------------------ properties
     @property
@@ -110,6 +126,20 @@ class MiniWoBEnvironment:
         res = self.step("CLICK_COORDS", coords=self.to_pixels(x, y))
         if res["ok"]:
             self.pointer = (x, y)
+        return res
+
+    def double_click_at(self, x: float, y: float) -> dict:
+        res = self.step("DBLCLICK_COORDS", coords=self.to_pixels(x, y))
+        if res["ok"]:
+            self.pointer = (x, y)
+        return res
+
+    def drag(self, start: tuple[float, float], end: tuple[float, float]) -> dict:
+        for name, point in (("MOUSEDOWN_COORDS", start), ("MOVE_COORDS", end), ("MOUSEUP_COORDS", end)):
+            res = self.step(name, coords=self.to_pixels(*point))
+            if not res["ok"] or res["done"]:
+                return res
+        self.pointer = end
         return res
 
     def click_ref(self, ref: int) -> dict:

@@ -1,4 +1,6 @@
-"""World model with two supervised heads, trained offline on collected episodes (spec v2, stage 3).
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+World model with two supervised heads, trained offline on collected episodes (spec v2, stage 3).
 
 The latent is r2dreamer's (same encoder, RSSM and representation losses), so it still learns dynamics.
 Two heads read it:

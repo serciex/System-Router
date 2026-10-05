@@ -1,4 +1,6 @@
-"""Stage 5 (later): RL fine-tuning of the world model online, with the two rewards, inside the whole system.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Stage 5 (later): RL fine-tuning of the world model online, with the two rewards, inside the whole system.
 
 Start this only after the supervised heads work (scripts/train_offline.py). `--init-from` loads the
 offline checkpoint so the world model and its latent start trained; the actor then learns route, level

@@ -1,4 +1,6 @@
-"""Degraded variant of any adapter: drops elements, shifts boxes and blanks labels.
+"""PENDING PORT to contract v0.3 (still uses the v0.2 adapter interface). Not used by the v3 loop.
+
+Degraded variant of any adapter: drops elements, shifts boxes and blanks labels.
 
 Used in training so the world model has already seen imperfect adapters before the LLM writes its own.
 Interaction still goes through the wrapped adapter unchanged.

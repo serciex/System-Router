@@ -1,4 +1,6 @@
-"""The world model's inputs, taken from the same frozen VLM.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+The world model's inputs, taken from the same frozen VLM.
 
 Vision: the VLM's vision tower runs on the screenshot (no language pass), its merged patch features are
 pooled to a fixed grid, and a fixed seeded random projection shrinks each cell to `cell_dim`.

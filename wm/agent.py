@@ -1,4 +1,6 @@
-"""r2dreamer's Dreamer with two reward heads and two critics (spec v2, "Training wiring").
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+r2dreamer's Dreamer with two reward heads and two critics (spec v2, "Training wiring").
 
 - `reward` / `value`          learn the decision reward `rew_dec`; their advantage trains the route dimension.
 - `reward_seg` / `value_seg`  learn the segmentation reward `rew_seg`; their advantage trains level and cells.

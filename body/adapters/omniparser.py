@@ -1,4 +1,6 @@
-"""OmniParser detector for the vision adapter (weights added later).
+"""PENDING PORT to contract v0.3 (still uses the v0.2 adapter interface). Not used by the v3 loop.
+
+OmniParser detector for the vision adapter (weights added later).
 
 Expects a checkout of https://github.com/microsoft/OmniParser on the Python path (its `util` package)
 and its weights in `weights_dir` (`icon_detect/model.pt` and `icon_caption_florence`). The OmniParser

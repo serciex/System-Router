@@ -19,3 +19,6 @@ venv/
 .ipynb_checkpoints/
 .env
 .DS_Store
+
+# Hidden conformance split (never shown to the model)
+conformance_hidden/

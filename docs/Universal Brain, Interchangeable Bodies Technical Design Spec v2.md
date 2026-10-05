@@ -2,6 +2,8 @@
 
 Oct 2, 2026 · @Mawunge Teye
 
+> **Superseded by [v3](Universal%20Brain,%20Interchangeable%20Bodies%20Technical%20Design%20Spec%20v3.md) (Oct 4, 2026).** Kept as the record of the world-model design.
+
 Supersedes [v1](Universal%20Brain,%20Interchangeable%20Bodies%20Technical%20Design%20Spec%20v1.md). The body contract is specified separately in [body/CONTRACT.md](../body/CONTRACT.md).
 
 ### What changed from v1
@@ -11,7 +13,7 @@ Supersedes [v1](Universal%20Brain,%20Interchangeable%20Bodies%20Technical%20Desi
 - The body is a **target contract built once**, with one sub-contract per decision model (navigation and action). Environments are added with a thin adapter only.
 - The world model is trained **supervised first**: episodes are collected once with both System 1 and System 2 answering every step, labeled in hindsight from the environment's verified success, and used offline to train two heads (which cells matter, will System 1 be wrong). **RL fine-tuning** with the two reward terms comes after, starting from that trained model.
 - Rewards are **two separate terms**, segmentation and decision, used in the later RL stage.
-- Scope is narrowed: **the LLM stays frozen, only the world model is trained**, across many adapters. LLM training comes later, to teach it to create adapters.
+- **Writing adapters is a trained capability in this phase.** It is one of the environments (the *adapter workshop*): the system queries an environment's codebase with agents, plans, writes the adapter, and is scored by the protected conformance suite and by how well the world model works through it. The LLM is trained slowly (LoRA, low learning rate, KL to the frozen base) in rounds staggered with the world model.
 - Training uses **sandboxed environments only** (MiniWoB++, WebArena, OSWorld VM), never the live web.
 
 ## Overview and core principle
@@ -35,12 +37,13 @@ Design goals:
 
 | In scope now | Deferred to the next phase |
 | --- | --- |
-| Train the world model only | Train the LLM, specifically on tasks that teach it to create adapters |
-| Frozen Qwen3.5-9B for all LLM roles | Teacher curriculum, mastery lists, step-down rules |
-| Hand-written adapters (the LLM may draft them) | Skill promotion, body writing and repair tasks |
-| Sandboxed web and VM environments | Games, VR and simulated robotics bodies |
+| Train the world model (supervised, then RL) | Teacher-generated curriculum, mastery lists, step-down rules |
+| Train the LLM slowly with LoRA: System 2 distilled into System 1, and **adapter writing** | Skill promotion, outer loop rewarded by world model improvement |
+| One Qwen3.5-9B base for all LLM roles; the frozen base is the teacher | Games, VR and simulated robotics bodies beyond one test game |
+| Hand-written reference adapters plus **LLM-written adapters** from the adapter workshop | |
+| Sandboxed web, VM and code-workspace environments | |
 
-The phase succeeds if the world model, trained across many adapters, performs well through an adapter it has never seen.
+The phase succeeds if (1) the world model, trained across many adapters, performs well through an adapter it has never seen, and (2) **an adapter the LLM wrote itself, for an environment it was never given an adapter for, passes conformance and lets the world model perform close to a hand-written one.** The project is not presented without (2).
 
 ## Components
 
@@ -104,6 +107,13 @@ Navigation and action are separate decision models, each restricted to its own s
 - They are aware of each other through the shared goal context and the "currently at" field, without an extra forward pass.
 - Global actions (fire, jump, keyboard shortcuts) are verbs on a built-in `self` target.
 - Each increment of movement is one System 1 decision (one pass), which matches the Doom demo's decision rate.
+
+### Making adapters interchangeable in practice
+
+Conformance guarantees the format, not the quality. Two contract-side additions narrow the gap between adapters:
+
+- **Canonical labels.** The contract, not the adapter, rewrites every target into one form, `role: name`, with roles from a fixed list (button, link, textbox, checkbox, option, text, icon, entity). System 1 then reads the same wording whichever adapter runs.
+- **Coverage check.** Conformance also compares an adapter's targets with a vision detection of the same screen and reports the matched fraction, so incomplete adapters are caught before the world model uses them. Coverage and mean confidence are world model inputs, so it escalates more through weak adapters.
 
 ### Adapter set for this phase
 
@@ -281,6 +291,7 @@ Sandboxed only, so every environment can be reset, acted in safely, and checked.
 | MiniWoB++ | Hundreds of small web tasks | DOM, accessibility, vision, degraded |
 | WebArena / VisualWebArena | Self-hosted realistic sites with programmatic task checks | DOM, accessibility, vision, degraded |
 | OSWorld | Ubuntu or Windows VMs with evaluation scripts and snapshot reset | Accessibility, vision (**held out**) |
+| **Adapter workshop** | A sandboxed codebase of a target environment; the task is to write its adapter (see below) | Protected code adapter (files, symbols, search hits, test results) |
 
 Training rules:
 
@@ -289,8 +300,71 @@ Training rules:
 - Adapter identity is never an input.
 - One adapter is held out entirely for evaluation.
 
+## Adapter workshop: writing adapters is an environment
+
+Writing an adapter is treated as one more environment, run by the same brain through the same contract. The environments and their hand-written adapters already exist, which gives the workshop its tasks, its ground truth and its scoring.
+
+### The environment
+
+| Part | What it is |
+| --- | --- |
+| **Workspace** | A sandboxed copy of the target environment's codebase (package source, docs, examples), the contract (`CONTRACT.md`, `body/adapters/base.py`, `body/schema.py`), and the reference adapters of *other* environments. The target's own reference adapter is never visible |
+| **Body** | A hand-written, protected **code adapter** that implements the contract over the workspace. Targets are files, symbols, search hits and test results. Verbs: `open`, `read`, `search` (arg: query), `write` (arg: path and content), `run_conformance`, `run_task` |
+| **View** | The workspace listing and the open file, rendered as a screen, so the world model sees it through the same VLM features and grid as any other environment |
+| **Success** | The written adapter passes the protected conformance suite, and the frozen world model reaches a target success rate on held-out tasks through it |
+
+### One episode
+
+1. **Query.** System 2 sends **query agents** into the codebase. Each is a System 2 call with `search` and `read` that answers one question: how does this environment expose its elements, how are clicks or movement sent, how is a frame captured, how is success reported. The answers go into the step log, bounded and summarized.
+2. **Plan.** System 2 writes the task list from those answers, using the same goal context as every environment. For example: map elements to `NativeElement`, normalize boxes, implement `invoke` for each verb, implement `point` or `move`, declare capabilities, run conformance, fix failures.
+3. **Navigate and act.** System 1 handles the many small steps (which file or hit to open next, which verb to use), with the world model choosing what to show and when to escalate, exactly as on a website.
+4. **Write.** Code is free-form, so `write` always takes its content from System 2. The plan item carries the target function, and System 2 generates it.
+5. **Check.** `run_conformance` asks the **protected core** to test the adapter in a separate sandboxed process (no network, time limit, core files outside the workspace and read-only). The report comes back as an outcome, and failures become repair subtasks.
+6. **Score.** On a conformance pass, `run_task` has the frozen world model run held-out tasks in the target environment through the new adapter.
+
+### Tasks, from easy to hard
+
+| Task | What the system must do | Ground truth |
+| --- | --- | --- |
+| **Repair** | Fix a reference adapter that was deliberately broken (verb removed, boxes not normalized, unstable handles, wrong outcome status) | The unbroken reference; unlimited tasks with known answers |
+| **Port** | Write a second adapter for an environment that already has one (DOM to accessibility tree, a different browser driver) | The existing adapters and their conformance results |
+| **New** | Write the first adapter for an environment that has none in the workspace | Conformance and downstream success only. One environment is **held out** for the headline test |
+
+### Rewards and labels
+
+- **Episode reward:** conformance pass (required), then the world model's held-out success through the adapter, relative to the hand-written reference adapter. Both are measured by the protected core, never by the LLM.
+- **Step labels for the world model:** the same hindsight rule as elsewhere. In successful episodes, the files and hits that were actually opened before a passing `write` are the important targets.
+- **Training data for the LLM:** successful episodes only (expert iteration). System 2 learns to write adapters from (plan item, gathered context) → passing code. System 1 learns the navigation choices that led there.
+
+### Protection against gaming the score
+
+- The conformance suite, the task runner and the reward computation run outside the workspace, in a separate process the LLM cannot write to.
+- An adapter is scored only through behaviour (conformance and downstream success), never by comparing its text with the reference.
+- Adapters that pass conformance but hurt downstream success are rejected, so passing the tests without real coverage does not pay.
+
+## Staggered rounds: world model and LLM
+
+The world model trains a lot each round; the LLM moves a little; only one learner changes at a time.
+
+```
+round k:
+  1. Collect     current system on all environments, including the adapter workshop    (both frozen)
+  2. World model  offline, many steps                                                  (LLM frozen)
+  3. LLM          LoRA, low learning rate, KL to the frozen base, few steps             (world model frozen)
+                  - System 1: distilled from System 2's choices in successful episodes
+                  - System 2: adapter writing, from successful workshop episodes
+  4. Recalibrate  re-score System 1 on stored steps, relabel "System 1 wrong",
+                  retrain the escalation head                                           (LLM frozen)
+```
+
+- **LoRA** keeps the frozen teacher free: it is the same weights with the adapter switched off.
+- LoRA is applied to the language layers only, and the world model's text feature is read with the adapter off, so the world model's inputs never drift.
+- Collection stores System 1's exact prompt and options, so it can be re-scored offline after each LLM update.
+- **Gate per round:** System 1's share rises, adapter-writing pass rate rises, success does not drop, held-out adapters and environments do not regress, and KL stays small.
+
 ## Evaluation
 
+- **Headline (adapter writing):** in the held-out environment, an LLM-written adapter's conformance pass and the world model's success through it, compared with the hand-written reference adapter.
 - **Held-out adapter:** performance through an unseen adapter compared with training adapters. A large gap means per-adapter specialists.
 - **Task success** from environment checkers.
 - **System 1 share** of steps and **step latency**, the main speed metrics.
@@ -314,6 +388,11 @@ Training rules:
 | Cost of LLM calls during training | Collect once, train offline as often as needed |
 | Unsolved tasks give no cell labels | Collect with System 2 executing; extend the dataset as more tasks are solved |
 | Dynamics may not matter on short MiniWoB tasks | Compare the world model heads with a plain classifier on the same data |
+| Written adapters game the tests | Conformance and scoring run in a protected process; scored by downstream success, never by text similarity |
+| Generated code harms the machine | Workspace sandbox, no network, time limits, core files outside the workspace |
+| LLM forgets general skills during LoRA rounds | Low learning rate, KL to the frozen base, held-out environments checked every round |
+| Codebase too large to read | Query agents answer one question each; answers are bounded and summarized into the log |
+| Novelty versus iSHIFT and FaST | Their learned focus and fast/slow switching live inside one model; the claim here rests on adapter writing against a fixed contract and adapter invariance, and they are reported as baselines where comparable |
 | Qwen3.5 incompatible with System One caching or padding | Verify first once weights are added; fall back to no `cache_prefix` or Qwen3-VL-8B |
 | Latency stacking (vision pass, world model, System 1, body) | Measure in stage 1 before setting expected latencies |
 | Segmentation and routing collude | Separate reward heads, critics and action slices |
@@ -336,8 +415,12 @@ Each stage is usable on its own and gated on a measurable result.
 2. **Collect** episodes on MiniWoB++ across adapters (DOM, accessibility, degraded), with both systems answering every step, plus a held-out-adapter set. *Gate:* enough successful episodes for cell labels, and a measured System 1 error rate. (`scripts/collect.py`)
 3. **Offline world model with supervised heads.** *Gate:* on held-out adapters, the cells head covers ≥95% of important targets with few cells, and the escalation head catches ≥90% of System 1 errors with little escalation; it also beats a plain classifier on the same data. (`scripts/train_offline.py`)
 4. **Online with the trained heads.** *Gate:* matches the stage 1 rules on success with fewer options shown and less System 2 use, including on the held-out adapter. (`scripts/run_stage1.py --policy heads`)
-5. **RL fine-tuning** in imagination with the two rewards, starting from the stage 3 model. *Gate:* improves on stage 4 without losing held-out performance. (`scripts/train_wm.py --init-from`)
-6. **WebArena and the OSWorld VM** (needs a cloud VM next to Colab). *Gate:* held-out performance close to training adapters.
+5. **Staggered rounds** (world model plus LoRA distillation of System 2 into System 1), with canonical labels and the coverage check in the contract. *Gate:* System 1 share rises round over round with no drop in success or held-out performance.
+6. **Adapter workshop.** The code workspace environment and its protected code adapter; repair tasks first, then port tasks, then new environments; System 2's adapter writing trained in the same rounds. *Gate:* repair and port pass rates rise round over round, and in the **held-out environment** an LLM-written adapter passes conformance with world model success close to the hand-written adapter's. The project is presented only once this gate is met.
+7. **RL fine-tuning** of the world model in imagination with the two rewards, starting from the supervised model. *Gate:* improves on stage 5 without losing held-out performance. (`scripts/train_wm.py --init-from`)
+8. **WebArena, the OSWorld VM and one game** (relative mode), each also used as a workshop target. *Gate:* held-out performance close to training adapters.
+
+Held-out environment for stage 6: candidates are the Doom setup from the system-one demo (relative mode, tests a very different body) or a second web driver. It is chosen before training starts and never shown to the workshop.
 
 Next phase: train the LLM to create adapters, then teacher curriculum, mastery lists, skill promotion and new body types (games, VR, simulated robotics), as described in v1.
 
@@ -368,3 +451,14 @@ In addition to v1's sources:
 - MiniWoB++, WebArena and OSWorld: sandboxed web and VM environments with programmatic task checks (from memory, not re-checked).
 - [Qwen3.5](https://qudata.com/en/news/exploring-qwen35-family/): natively multimodal open-weight models.
 - [Dreamer 4 (Hafner, Yan, Lillicrap)](https://arxiv.org/abs/2509.24527): world models on tokenized observations and agents trained in imagination.
+
+Closest related work found in the literature search (Oct 2026), and how this design differs:
+
+- [iSHIFT](https://arxiv.org/pdf/2512.22009): a 2.5B GUI agent whose perception tokens choose both where to look and slow or fast mode, inside one model. Here, a separate world model controls a frozen LLM over verified options from a contract.
+- [FaST, Visual Agents as Fast and Slow Thinkers](https://arxiv.org/abs/2408.08862): a switch adapter between System 1 and System 2 with region proposals in slow mode, for visual question answering.
+- Observation pruning for GUI agents: [SimpAgent](https://arxiv.org/html/2507.03730v1), [GUI-Actor](https://arxiv.org/html/2506.03143v1), [RegionFocus](https://arxiv.org/html/2505.00684.pdf), [A11y-Compressor](https://arxiv.org/pdf/2605.00551), [AQuaUI](https://arxiv.org/html/2605.19260v1), surveyed in [Efficient GUI Agents](https://arxiv.org/pdf/2609.02309).
+- [SkillWeaver](https://arxiv.org/pdf/2504.07079): web agents write and test reusable skill APIs. Those are procedures, not perception and action adapters against a fixed contract.
+- [ALIGN](https://arxiv.org/abs/2505.21055): automatically generated agent-environment interface wrappers, without a conformance suite or an adapter-invariant learner.
+- [EvoHarness-RL](https://arxiv.org/html/2608.05446v1): RL-trained use of a fixed harness whose adapters are supplied, not written.
+
+No work found trains an LLM to write perception and action adapters against a fixed contract, verified by a protected conformance suite, while a separate learner is trained to be invariant to the adapter. The search was not exhaustive and should be repeated before publication.

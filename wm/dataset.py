@@ -1,4 +1,6 @@
-"""Collected episodes for offline training.
+"""OBSOLETE under spec v3 (world model removed). Kept for reference; may not import. Ask the owner before deleting.
+
+Collected episodes for offline training.
 
 Each episode is two files: `episode_NNNNNN.npz` with per-step world model inputs (vis, txt, vec) and the
 decision taken (action), and `episode_NNNNNN.json` with the step records (both systems' answers, target

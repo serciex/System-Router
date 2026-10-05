@@ -1,8 +1,8 @@
-"""Protected core: completion checks, latency measurement and executor limits.
+"""Protected core: completion checks, latency, executor limits, change check, think rule, goal age.
 
-Read-only to the LLM. Adapters never report latency or judge completion; this module does.
+Read-only to the LLM. Adapters never report latency or judge completion.
 
-Completion conditions are small JSON objects written by System 2 into each subtask:
+Completion conditions are small JSON objects written by think into each subtask:
 
     {"type": "env_success"}
     {"type": "text_visible", "text": "Welcome"}
@@ -19,7 +19,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .schema import Target
+import numpy as np
+
+from .schema import BBox, Target
 
 
 @dataclass
@@ -28,11 +30,44 @@ class CheckState:
     env_success: Optional[bool] = None
 
 
+def changed(before: Optional[np.ndarray], after: Optional[np.ndarray], threshold: float = 0.5,
+            watch: Optional[list[BBox]] = None) -> bool:
+    """Mean absolute pixel difference above threshold, over the watched regions or the whole frame."""
+    if before is None or after is None or before.shape != after.shape:
+        return True
+    diff = np.abs(before.astype(np.int16) - after.astype(np.int16))
+    if not watch:
+        return float(diff.mean()) > threshold
+    h, w = diff.shape[:2]
+    for x0, y0, x1, y1 in watch:
+        region = diff[int(y0 * h):max(int(y1 * h), int(y0 * h) + 1), int(x0 * w):max(int(x1 * w), int(x0 * w) + 1)]
+        if region.size and float(region.mean()) > threshold:
+            return True
+    return False
+
+
 class Core:
-    def __init__(self, allow_irreversible: bool = False, allowed_verbs: tuple[str, ...] = ()):
+    def __init__(self, allow_irreversible: bool = False, allowed_verbs: tuple[str, ...] = (),
+                 change_threshold: float = 0.5, think_below: float = 0.35, goal_max_age: int = 5):
         self.allow_irreversible = bool(allow_irreversible)
         self.allowed_verbs = tuple(allowed_verbs)
+        self.change_threshold = float(change_threshold)
+        self.think_below = float(think_below)
+        self.goal_max_age = int(goal_max_age)
         self._start: float | None = None
+
+    # --- change check ----------------------------------------------------
+    def window_changed(self, before: Optional[np.ndarray], after: Optional[np.ndarray],
+                       watch: Optional[list[BBox]] = None) -> bool:
+        return changed(before, after, self.change_threshold, watch)
+
+    # --- hard think rule --------------------------------------------------
+    def force_think(self, top_probability: float) -> bool:
+        return top_probability < self.think_below
+
+    # --- goal age ---------------------------------------------------------
+    def goal_valid(self, goal_tick: int, now_tick: int, window_changed_since: bool) -> bool:
+        return not window_changed_since and (now_tick - goal_tick) <= self.goal_max_age
 
     # --- latency ---------------------------------------------------------
     def start(self) -> None:

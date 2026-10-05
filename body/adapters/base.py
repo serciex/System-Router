@@ -1,10 +1,6 @@
-"""Adapter interface (CONTRACT.md, "What an adapter provides").
+"""Adapter interface (CONTRACT.md v0.3). The interaction channel only.
 
-An adapter must translate honestly, keep handles stable, mark pixel-inferred elements with confidence < 1,
-and pass interaction straight through. It must not rank by relevance, decide anything, time itself,
-or judge completion.
-
-Every native call returns a small result dict:
+Every native call returns a result dict:
     {"ok": bool, "text": str, "reward": float, "done": bool, "success": bool | None, "blocked": bool}
 """
 
@@ -13,7 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from ..schema import CONTRACT_VERSION, Capabilities, Frame
+from ..schema import CONTRACT_VERSION, InteractionManifest, Item, Point
 
 
 def result(ok: bool, text: str = "", reward: float = 0.0, done: bool = False, success: Optional[bool] = None,
@@ -26,32 +22,27 @@ class Adapter(ABC):
     contract_version: str = CONTRACT_VERSION
 
     @abstractmethod
-    def read(self) -> Frame:
-        """Current frame, anchor and native elements."""
+    def manifest(self) -> InteractionManifest:
+        """Interaction half of the manifest."""
 
     @abstractmethod
-    def invoke(self, handle: Any, native_action: str, arg: Optional[str] = None) -> dict:
-        """Run the environment's own function for a verb on an element. `handle=None` means the `self` target."""
+    def find(self, scope: Any = None) -> list[Item]:
+        """Visible items in the window, or inside the scope (a group handle or a region)."""
+
+    @abstractmethod
+    def invoke(self, handle: Any, verb: str, arg: Optional[str] = None) -> dict:
+        """Run a verb on an item; handle None means the self target."""
+
+    def act_at(self, handle: Any, points: list[Point], verb: str) -> dict:
+        """Run a verb at window-normalized points on a surface."""
+        return result(False, f"{self.name} has no surfaces")
 
     def move(self, inputs: dict[str, str]) -> dict:
-        """Relative mode only: send movement inputs, one per axis."""
-        raise NotImplementedError(f"{self.name} does not support relative movement")
+        """Relative mode: one input per declared axis."""
+        return result(False, f"{self.name} does not support relative movement")
 
-    def point(self, x: float, y: float) -> dict:
-        """Absolute mode only: move the pointer to a normalized position."""
-        raise NotImplementedError(f"{self.name} does not support an absolute pointer")
-
-    def source(self) -> Optional[str]:
-        """Raw source for the labeler (DOM, accessibility tree, code), or None."""
-        return None
-
-    @abstractmethod
-    def capabilities(self) -> Capabilities:
-        """Declared capabilities."""
-
-    def reset(self, seed: Optional[int] = None) -> Frame:
-        """Restart the episode. Only the primary adapter of a body is reset; the others re-read."""
-        raise NotImplementedError
+    def reset(self, seed: Optional[int] = None) -> None:
+        """Clear adapter state for a new episode (the environment is reset by integration)."""
 
     def close(self) -> None:
         pass
